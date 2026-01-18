@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+python-multipart
+pymongo
+google-generativeai
+pillow
+pillow-heif
+fpdf
+dnspython
+pydantic
