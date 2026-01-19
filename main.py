@@ -1,25 +1,32 @@
-# main.py
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Body
-from pydantic import BaseModel
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from pymongo import MongoClient
+from bson.objectid import ObjectId
 import google.generativeai as genai
 from PIL import Image, ImageOps
 import io
 import os
+import re # Importante para a extração das tags
 import urllib.parse
 from datetime import datetime
-from fpdf import FPDF
 import base64
+import random
+import pillow_heif
 
-# --- CONFIGURAÇÃO E MODELOS DE IA ---
-app = FastAPI(title="TechnoBolt Gym Hub API", version="50.0")
+# --- INICIALIZAÇÃO DE SUPORTE HEIC ---
+pillow_heif.register_heif_opener()
 
-# Motores para Análise Profunda (Relatórios)
-MOTORES_ANALISE = ["models/gemini-2.0-flash", "models/gemini-2.5-flash"]
+app = FastAPI(title="TechnoBolt Gym Hub API", version="65.0-Elite")
 
-# Motores para Rede Social e Validação Rápida (Alta Cota)
-MOTORES_SOCIAL = ["models/gemini-3-flash-preview", "models/gemini-flash-latest"]
+# --- MOTORES DE IA (LISTA ATUALIZADA) ---
+# Usaremos esta lista para tudo, garantindo o uso das cotas disponíveis nesses modelos potentes.
+MOTORES_TECHNOBOLT = [
+    "models/gemini-3-flash-preview",
+    "models/gemini-2.5-flash",
+    "models/gemini-2.0-flash",
+    "models/gemini-flash-latest"
+]
 
+# --- CONEXÃO BANCO ---
 def get_database():
     try:
         user = os.environ.get("MONGO_USER", "technobolt")
@@ -35,20 +42,20 @@ db = get_database()
 
 # --- FUNÇÕES UTILITÁRIAS ---
 
-def rodar_ia(prompt, imagem_bytes, tipo="analise"):
+def rodar_ia(prompt, imagem_bytes=None):
     """
-    Sistema de rotação inteligente.
-    tipo='analise': usa modelos robustos.
-    tipo='social': usa modelos rápidos/alta cota.
+    Roda a IA com sistema de tentativas nos modelos especificados.
     """
-    motores = MOTORES_SOCIAL if tipo == "social" else MOTORES_ANALISE
     chaves = [os.environ.get(f"GEMINI_CHAVE_{i}") for i in range(1, 8) if os.environ.get(f"GEMINI_CHAVE_{i}")]
-    
     img_blob = {"mime_type": "image/jpeg", "data": imagem_bytes} if imagem_bytes else None
+    
+    # Mistura as chaves para balanceamento de carga
+    random.shuffle(chaves)
     
     for chave in chaves:
         genai.configure(api_key=chave)
-        for modelo in motores:
+        # Tenta cada modelo da sua lista preferida
+        for modelo in MOTORES_TECHNOBOLT:
             try:
                 model = genai.GenerativeModel(modelo)
                 inputs = [prompt, img_blob] if img_blob else [prompt]
@@ -56,64 +63,36 @@ def rodar_ia(prompt, imagem_bytes, tipo="analise"):
                 if response and response.text:
                     return response.text
             except Exception as e:
-                continue
+                continue # Tenta o próximo modelo/chave
     return None
 
-def otimizar_imagem(file_bytes, qualidade=70):
-    """Comprime imagem para não estourar o banco de dados"""
-    img = Image.open(io.BytesIO(file_bytes))
-    img = img.convert("RGB")
-    img.thumbnail((800, 800)) # Redimensiona para HD Mobile
-    output = io.BytesIO()
-    img.save(output, format='JPEG', quality=qualidade)
-    return output.getvalue()
+def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
+    """Otimiza imagem para salvar no banco ou enviar pra IA"""
+    try:
+        img = Image.open(io.BytesIO(file_bytes))
+        img = ImageOps.exif_transpose(img).convert("RGB") # Corrige rotação e cor
+        img.thumbnail(size)
+        output = io.BytesIO()
+        img.save(output, format='JPEG', quality=quality)
+        return output.getvalue()
+    except Exception:
+        return file_bytes # Retorna original se falhar
 
-def gerar_pdf_bytes(nome, dados):
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, f"TECHNOBOLT GYM - RELATÓRIO: {nome.upper()}", ln=True, align='C')
-    pdf.set_font("Arial", "", 12)
-    
-    # Sanitiza e adiciona conteúdo
-    texto_completo = f"""
-    DATA: {datetime.now().strftime("%d/%m/%Y")}
-    
-    1. ANÁLISE CORPORAL:
-    {dados.get('r1', 'N/A')}
-    
-    2. DIETA & NUTROGENÔMICA:
-    {dados.get('r2', 'N/A')}
-    
-    3. SUPLEMENTAÇÃO (NEXO METABÓLICO):
-    {dados.get('r3', 'N/A')}
-    
-    4. TREINO (BIOMECÂNICA):
-    {dados.get('r4', 'N/A')}
+def extrair_tags(texto_ia, tag_inicio, tag_fim=None):
     """
-    # Tratamento básico de encoding para PDF
-    texto_safe = texto_completo.encode('latin-1', 'replace').decode('latin-1')
-    pdf.multi_cell(0, 10, texto_safe)
-    return pdf.output(dest='S').encode('latin-1')
-
-# --- ENDPOINTS: GESTÃO DE ACESSO ---
-
-@app.post("/auth/registro")
-def registrar(dados: dict):
-    # dados: nome, usuario, senha, genero, peso, altura
-    if db.usuarios.find_one({"usuario": dados['usuario']}):
-        raise HTTPException(400, "Usuário já existe")
+    Mesma lógica de extração do Streamlit para separar os relatórios.
+    """
+    t_i = tag_inicio.replace('[', '\\[').replace(']', '\\]')
+    if tag_fim:
+        t_f = tag_fim.replace('[', '\\[').replace(']', '\\]')
+        padrao = f"{t_i}\\s*(.*?)\\s*(?={t_f}|$)"
+    else:
+        padrao = f"{t_i}\\s*(.*)"
     
-    novo = {
-        **dados,
-        "status": "ativo", # Cadastro direto como ativo para MVP
-        "is_admin": False,
-        "pontos_social": 0,
-        "avaliacoes_restantes": 1, # Crédito inicial
-        "historico_dossies": []
-    }
-    db.usuarios.insert_one(novo)
-    return {"sucesso": True}
+    match = re.search(padrao, texto_ia, re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else "Conteúdo não gerado corretamente pela IA."
+
+# --- ENDPOINTS: AUTH & PERFIL ---
 
 @app.post("/auth/login")
 def login(dados: dict):
@@ -121,24 +100,38 @@ def login(dados: dict):
     if not user: raise HTTPException(401, "Credenciais inválidas")
     return {
         "sucesso": True,
-        "usuario": user['usuario'],
-        "nome": user['nome'],
-        "is_admin": user.get('is_admin', False),
-        "peso": user.get('peso'),
-        "altura": user.get('altura'),
-        "pontos": user.get('pontos_social', 0)
+        "dados": {
+            "usuario": user['usuario'],
+            "nome": user['nome'],
+            "is_admin": user.get('is_admin', False),
+            "peso": user.get('peso'),
+            "altura": user.get('altura'),
+            "genero": user.get('genero', 'Masculino'),
+            "creditos": user.get('avaliacoes_restantes', 0),
+            "restricoes_alim": user.get('restricoes_alim', ''),
+            "restricoes_fis": user.get('restricoes_fis', ''),
+            "medicamentos": user.get('medicamentos', ''),
+            "info_add": user.get('info_add', '')
+        }
     }
 
-@app.post("/admin/tornar-admin")
-def toggle_admin(dados: dict):
-    # Quem está pedindo deve ser admin
-    requester = db.usuarios.find_one({"usuario": dados['requester'], "is_admin": True})
-    if not requester: raise HTTPException(403, "Sem permissão")
-    
-    db.usuarios.update_one({"usuario": dados['target']}, {"$set": {"is_admin": True}})
+@app.post("/perfil/atualizar")
+def atualizar_perfil(dados: dict):
+    db.usuarios.update_one(
+        {"usuario": dados['usuario']},
+        {"$set": {
+            "nome": dados.get('nome'),
+            "peso": dados.get('peso'),
+            "altura": dados.get('altura'),
+            "restricoes_alim": dados.get('restricoes_alim'),
+            "restricoes_fis": dados.get('restricoes_fis'),
+            "medicamentos": dados.get('medicamentos'),
+            "info_add": dados.get('info_add')
+        }}
+    )
     return {"sucesso": True}
 
-# --- ENDPOINTS: ANÁLISE CORPORAL (IA) ---
+# --- ENDPOINT: ANÁLISE DE ELITE (PROMPT RESTAURADO) ---
 
 @app.post("/analise/executar")
 async def executar_analise(
@@ -147,167 +140,170 @@ async def executar_analise(
     peso: float = Form(...),
     altura: int = Form(...),
     objetivo: str = Form(...),
+    genero: str = Form("Masculino"),
     foto: UploadFile = File(...)
 ):
-    # 1. Atualizar dados cadastrais antes da análise
-    db.usuarios.update_one({"usuario": usuario}, {"$set": {"nome": nome_completo, "peso": peso, "altura": altura}})
+    # 1. Recupera dados complementares do usuário para o prompt
+    user_data = db.usuarios.find_one({"usuario": usuario})
+    r_a = user_data.get('restricoes_alim', 'Nenhuma')
+    r_m = user_data.get('medicamentos', 'Nenhum')
+    r_f = user_data.get('restricoes_fis', 'Nenhuma')
+    info = user_data.get('info_add', '')
+
+    # 2. Atualiza dados básicos
+    db.usuarios.update_one({"usuario": usuario}, {"$set": {"nome": nome_completo, "peso": peso, "altura": altura, "genero": genero}})
     
-    # 2. Ler e processar imagem
+    # 3. Processamento de Imagem
     content = await foto.read()
+    img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
+    
     imc = peso / ((altura/100)**2)
     
-    # 3. Prompt MESTRE (Exatamente como solicitado)
-    prompt = f"""VOCÊ É UM CONSELHO TÉCNICO DE ESPECIALISTAS DE ELITE DA TECHNOBOLT GYM.
-    ATLETA: {nome_completo} | IMC: {imc:.2f} | META: {objetivo}.
+    # 4. O PROMPT MESTRE (RESTAURADO DO CÓDIGO ANTIGO)
+    prompt_mestre = f"""VOCÊ É UM CONSELHO TÉCNICO DE ESPECIALISTAS DE ELITE DA TECHNOBOLT GYM.
+    ATLETA: {nome_completo} | GÊNERO: {genero} | IMC: {imc:.2f}.
+    META: {objetivo}. 
+    RESTRIÇÕES: {r_a}, {r_m}, {r_f}.
+    OBSERVAÇÕES: {info}.
 
-    RESTRITO: SEM SAUDAÇÕES. RESPOSTA DIRETA EM LISTAS.
-    [RETORNE UM JSON NO FORMATO]: {{"r1": "...", "r2": "...", "r3": "...", "r4": "..."}}
+    RESTRITO: SEM SAUDAÇÕES OU TÍTULOS. RESPOSTA DIRETA EM LISTAS (NÃO USE TABELAS).
+    EXPLIQUE TODOS OS TERMOS TÉCNICOS ENTRE PARÊNTESES DE FORMA INTUITIVA.
 
-    1. [AVALIACAO] (Antropometria ISAK 4): Segmentação e Dobras.
-    2. [NUTRICAO] (Nutrogenômica): Dieta extensa.
-    3. [SUPLEMENTACAO] (Ortomolecular): Nexo Metabólico.
-    4. [TREINO] (Biomecânica): 7 dias, alto volume, alternativas técnicas.
+    [AVALIACAO]
+    Aja como Especialista em Cineantropometria e Antropometria Avançada (ISAK 4). Sua prioridade é o diagnóstico visual exaustivo entregue em listas organizadas:
+    1. SEGMENTAÇÃO CORPORAL (PONTOS DE ATENÇÃO):
+    - Tronco e Cabeça: Pescoço, tórax (mesoesternal), cintura, abdômen (umbilical), quadril (glúteo).
+    - Membros Superiores: Braço relaxado, contraído, antebraço, punho.
+    - Membros Inferiores: Coxa proximal, medial, distal, panturrilha máxima, tornozelo.
+    2. ESTIMATIVA DE DOBRAS CUTÂNEAS (DISTRIBUIÇÃO ADIPOSA):
+    - Tronco: Peitoral, axilar média, suprailíaca, supraespinal, abdominal, subescapular, lombar.
+    - Membros: Tricepital, bicepital, coxa medial, panturrilha medial.
+    AO FINAL: 🚀 TECHNOBOLT INSIGHT: 3 recomendações técnicas.
+
+    [NUTRICAO]
+    Especialista em Nutrogenômica. Plano dietético extenso (2 opções/ref). Foco em Flexibilidade Metabólica. Respeite: {r_a}.
+    AO FINAL: 🚀 TECHNOBOLT INSIGHT: 3 recomendações.
+
+    [SUPLEMENTACAO]
+    Especialista Ortomolecular. 3-10 itens via Nexo Metabólico. mTOR e modulação hormonal. Verifique: {r_m}.
+    AO FINAL: 🚀 TECHNOBOLT INSIGHT: 3 recomendações.
+
+    [TREINO]
+    Especialista em Neuromecânica. O TREINO DEVE RESOLVER AS FALHAS DA FOTO.
+    7 DIAS EM LISTA DETALHADA. MÍNIMO 5 EXERCÍCIOS/DIA.
+    ESTRUTURA: Exercício (Alternativa) | Séries x Reps | Justificativa Biomecânica.
+    AO FINAL: 🚀 TECHNOBOLT INSIGHT: 3 recomendações.
     """
     
-    raw_res = rodar_ia(prompt, content, tipo="analise")
+    # 5. Execução da IA
+    resultado_texto = rodar_ia(prompt_mestre, img_otimizada)
     
-    # Parser simples do retorno (idealmente a IA retorna JSON puro, mas aqui tratamos string)
-    # Assumindo que a IA obedeceu o formato JSON ou tags. Para robustez, usaremos regex no Frontend ou aqui.
-    # Vamos salvar o RAW e o Frontend trata a exibição nas abas.
-    
+    if not resultado_texto:
+        raise HTTPException(503, "IA Indisponível (Cotas excedidas ou erro nos servidores).")
+
+    # 6. Extração Estruturada (Lógica do Streamlit portada para o Backend)
+    r1 = extrair_tags(resultado_texto, "[AVALIACAO]", "[NUTRICAO]")
+    r2 = extrair_tags(resultado_texto, "[NUTRICAO]", "[SUPLEMENTACAO]")
+    r3 = extrair_tags(resultado_texto, "[SUPLEMENTACAO]", "[TREINO]")
+    r4 = extrair_tags(resultado_texto, "[TREINO]")
+
+    # 7. Salvar no Banco (Formato compatível com o App Mobile)
     dossie = {
-        "data": datetime.now().strftime("%d/%m/%Y"),
+        "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "peso_reg": peso,
-        "conteudo_bruto": raw_res # O App vai dividir isso nas abas
+        "conteudo_bruto": {
+            "r1": r1,
+            "r2": r2,
+            "r3": r3,
+            "r4": r4,
+            "full_text": resultado_texto # Backup
+        }
     }
     
-    db.usuarios.update_one({"usuario": usuario}, {"$push": {"historico_dossies": dossie}})
+    # Desconta crédito se não for admin
+    if not user_data.get('is_admin', False):
+        db.usuarios.update_one({"usuario": usuario}, {"$push": {"historico_dossies": dossie}, "$inc": {"avaliacoes_restantes": -1}})
+    else:
+        db.usuarios.update_one({"usuario": usuario}, {"$push": {"historico_dossies": dossie}})
     
     return {"sucesso": True, "resultado": dossie}
 
-# --- ENDPOINTS: TECHNO GYMERS (REDE SOCIAL & GAMIFICATION) ---
+@app.get("/historico/{usuario}")
+def buscar_historico(usuario: str):
+    user = db.usuarios.find_one({"usuario": usuario})
+    if not user: return {"sucesso": False, "mensagem": "Usuário não encontrado"}
+    return {"sucesso": True, "historico": user.get('historico_dossies', [])}
+
+# --- ENDPOINTS: SOCIAL E DESAFIOS (USANDO MESMOS MOTORES) ---
 
 @app.post("/social/postar")
-async def criar_post(
-    usuario: str = Form(...),
-    texto: str = Form(...),
-    imagem: UploadFile = File(None)
-):
-    img_b64 = None
-    if imagem:
-        bytes_img = await imagem.read()
-        otimizada = otimizar_imagem(bytes_img)
-        img_b64 = base64.b64encode(otimizada).decode('utf-8')
-    
-    post = {
+async def postar_feed(usuario: str = Form(...), legenda: str = Form(...), imagem: UploadFile = File(...)):
+    content = await imagem.read()
+    img_otimizada = otimizar_imagem(content, size=(600, 600))
+    img_b64 = base64.b64encode(img_otimizada).decode('utf-8')
+
+    post_id = db.posts.insert_one({
         "autor": usuario,
-        "texto": texto,
+        "legenda": legenda,
         "imagem": img_b64,
-        "likes": [],
-        "comentarios": [],
         "data": datetime.now().isoformat(),
-        "tipo": "feed" # feed ou desafio_completado
-    }
-    db.posts.insert_one(post)
+        "likes": [],
+        "comentarios": []
+    }).inserted_id
+
+    # IA Comentando (Personalidade TechnoBolt)
+    prompt_comentario = f"Aja como um personal trainer motivador e sarcástico da TechnoBolt. Crie um comentário curto (máx 15 palavras) para essa foto de treino com a legenda: '{legenda}'"
+    comentario_ia = rodar_ia(prompt_comentario, img_otimizada)
+    
+    if comentario_ia:
+        db.posts.update_one({"_id": post_id}, {"$push": {"comentarios": {"autor": "TechnoBolt AI 🤖", "texto": comentario_ia}}})
+
     return {"sucesso": True}
 
 @app.post("/social/desafio/criar")
 def criar_desafio(dados: dict):
-    # dados: titulo, descricao, prazo, criador
-    desafio = {
-        **dados,
-        "participantes": [dados['criador']],
-        "status": "ativo",
-        "ranking": {} # {usuario: pontos}
-    }
-    db.desafios.insert_one(desafio)
+    # Validação de Propósito
+    prompt_validacao = f"Analise se este desafio é relacionado a saúde/fitness: '{dados['titulo']} - {dados.get('descricao')}'. Responda APENAS 'SIM' ou 'NAO'."
+    res = rodar_ia(prompt_validacao)
+    
+    if not res or "SIM" not in res.upper():
+        return {"sucesso": False, "mensagem": "A IA detectou que este desafio não é focado em saúde."}
+
+    novo_desafio = {**dados, "criador": dados['usuario'], "participantes": [dados['usuario']], "ranking": {dados['usuario']: 0}, "status": "ativo"}
+    db.desafios.insert_one(novo_desafio)
     return {"sucesso": True}
 
-@app.post("/social/desafio/validar-ia")
-async def validar_desafio(
-    usuario: str = Form(...),
-    id_desafio: str = Form(...),
-    foto_prova: UploadFile = File(...)
-):
-    """
-    O JUIZ DE IA: Analisa a foto e valida se o desafio foi cumprido.
-    """
-    from bson.objectid import ObjectId
-    desafio = db.desafios.find_one({"_id": ObjectId(id_desafio)})
-    if not desafio: raise HTTPException(404, "Desafio não existe")
-    
-    content = await foto_prova.read()
-    
-    # Prompt do Juiz
-    prompt_juiz = f"""
-    VOCÊ É UM JUIZ DE COMPETIÇÃO FITNESS IMPARCIAL.
-    O DESAFIO É: "{desafio['titulo']} - {desafio.get('descricao')}".
-    
-    Analise a imagem fornecida. Ela comprova que o usuário cumpriu este desafio específico?
-    Se for uma foto genérica, escura ou que não prova nada, REPROVE.
-    
-    Retorne APENAS um JSON:
-    {{"aprovado": true/false, "motivo": "Explicação curta", "pontos": 10}}
-    """
-    
-    res_ia = rodar_ia(prompt_juiz, content, tipo="social")
-    
-    # (Aqui entra um parser de JSON do texto da IA, vamos simular o objeto para brevidade)
-    # Supondo que res_ia seja a string JSON
-    import json
-    try:
-        resultado = json.loads(res_ia.replace("```json", "").replace("```", ""))
-    except:
-        # Fallback se a IA não retornar JSON limpo
-        resultado = {"aprovado": "true" in res_ia.lower(), "motivo": "Análise automática", "pontos": 10}
+# --- ENDPOINTS: ADMIN ---
 
-    if resultado['aprovado']:
-        # Atualiza Ranking
-        db.desafios.update_one(
-            {"_id": ObjectId(id_desafio)},
-            {"$inc": {f"ranking.{usuario}": resultado['pontos']}}
-        )
-        # Dá pontos globais ao usuário
-        db.usuarios.update_one({"usuario": usuario}, {"$inc": {"pontos_social": resultado['pontos']}})
-        
-        # Posta a prova no feed automaticamente
-        otimizada = otimizar_imagem(content)
-        img_b64 = base64.b64encode(otimizada).decode('utf-8')
-        db.posts.insert_one({
-            "autor": usuario,
-            "texto": f"✅ Cumpriu o desafio: {desafio['titulo']}! Motivo: {resultado['motivo']}",
-            "imagem": img_b64,
-            "likes": [],
-            "comentarios": [],
-            "data": datetime.now().isoformat(),
-            "tipo": "prova_desafio"
-        })
-        
-    return resultado
+@app.get("/admin/listar")
+def listar_usuarios():
+    users = list(db.usuarios.find())
+    for u in users: u['_id'] = str(u['_id'])
+    return {"sucesso": True, "usuarios": users}
 
-@app.get("/social/feed")
-def get_feed():
-    # Retorna os últimos 50 posts
-    posts = list(db.posts.find().sort("data", -1).limit(50))
-    for p in posts: p['_id'] = str(p['_id'])
-    return {"feed": posts}
-
-@app.post("/social/chat/enviar")
-def enviar_mensagem(dados: dict):
-    # dados: remetente, destinatario, mensagem
-    msg = {
-        **dados,
-        "timestamp": datetime.now().isoformat(),
-        "lida": False
-    }
-    db.chat.insert_one(msg)
+@app.post("/admin/editar")
+def editar_usuario(dados: dict):
+    db.usuarios.update_one({"usuario": dados['target_user']}, {"$set": {"status": dados.get('status'), "avaliacoes_restantes": int(dados.get('creditos', 0))}})
     return {"sucesso": True}
 
-@app.get("/social/chat/{usuario}")
-def ler_chat(usuario: str):
-    # Pega mensagens onde o usuário é remetente ou destinatário
-    msgs = list(db.chat.find({
-        "$or": [{"remetente": usuario}, {"destinatario": usuario}]
-    }).sort("timestamp", 1))
+@app.post("/admin/excluir")
+def excluir_usuario(dados: dict):
+    db.usuarios.delete_one({"usuario": dados['target_user']})
+    return {"sucesso": True}
+
+# --- ENDPOINTS: CHAT ---
+@app.get("/chat/usuarios")
+def listar_usuarios_chat(usuario_atual: str):
+    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
+    return {"sucesso": True, "usuarios": users}
+
+@app.get("/chat/mensagens")
+def pegar_mensagens(user1: str, user2: str):
+    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
     for m in msgs: m['_id'] = str(m['_id'])
-    return {"mensagens": msgs}
+    return {"sucesso": True, "mensagens": msgs}
+
+@app.post("/chat/enviar")
+def enviar_mensagem(dados: dict):
+    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
+    return {"sucesso": True}
