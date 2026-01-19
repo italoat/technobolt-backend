@@ -11,6 +11,8 @@ from datetime import datetime
 import base64
 import random
 import pillow_heif
+from fpdf import FPDF
+from fastapi.responses import StreamingResponse
 
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
@@ -85,7 +87,76 @@ def extrair_tags(texto_ia, tag_inicio, tag_fim=None):
     
     match = re.search(padrao, texto_ia, re.DOTALL | re.IGNORECASE)
     return match.group(1).strip() if match else "Conteúdo não gerado corretamente pela IA."
+Essa é uma funcionalidade essencial para dar um tom "Premium" ao aplicativo. Para entregar um PDF formatado, profissional e com boa UX, a melhor estratégia não é gerar o PDF no celular (que é lento e limitado), mas sim gerar no Backend (Python) usando a biblioteca fpdf (que você já usava no Streamlit) e enviar para o celular apenas baixar e abrir.
 
+Aqui está a implementação completa dividida em 3 passos:
+
+📦 Passo 1: Backend (main.py) - O Motor de PDF
+Vamos criar um endpoint que desenha o PDF com design "Elite" (Cabeçalho azul, fontes limpas, layout organizado) e retorna o arquivo binário.
+
+Adicione/Substitua as importações e adicione a classe PDF e o endpoint no seu main.py:
+
+Python
+
+# --- Adicione estas importações no topo do main.py ---
+from fpdf import FPDF
+from fastapi.responses import StreamingResponse
+
+# --- CLASSE DE PDF & UTILITÁRIOS (Cole antes dos endpoints) ---
+
+def sanitizar_texto(texto):
+    """Remove emojis e caracteres incompatíveis com Latin-1 do PDF"""
+    if not texto: return ""
+    # Substituições manuais para evitar erros de encode
+    texto = texto.replace("🚀", ">>").replace("✅", "[OK]").replace("⚠️", "[!]")
+    texto = texto.replace("💊", "").replace("🥗", "").replace("🏋️", "").replace("📊", "")
+    # Remove asteriscos de markdown
+    texto = texto.replace("**", "").replace("###", "").replace("##", "")
+    
+    # Tenta codificar para latin-1, ignorando o que não consegue
+    return texto.encode('latin-1', 'replace').decode('latin-1')
+
+class TechnoBoltPDF(FPDF):
+    def header(self):
+        # Fundo do cabeçalho
+        self.set_fill_color(13, 13, 13) # Preto Quase Puro
+        self.rect(0, 0, 210, 40, 'F')
+        
+        # Título
+        self.set_xy(10, 10)
+        self.set_font("Helvetica", "B", 20)
+        self.set_text_color(59, 130, 246) # Azul TechnoBolt (#3B82F6)
+        self.cell(0, 10, "TECHNOBOLT GYM HUB", ln=True, align='L')
+        
+        # Subtítulo
+        self.set_font("Helvetica", "I", 9)
+        self.set_text_color(200, 200, 200)
+        self.cell(0, 5, "RELATORIO DE ALTA PERFORMANCE | PHP PROTOCOL", ln=True, align='L')
+        self.ln(20)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Helvetica", "I", 8)
+        self.set_text_color(128, 128, 128)
+        self.cell(0, 10, f'Pagina {self.page_no()}', 0, 0, 'C')
+
+    def chapter_title(self, label):
+        self.set_font("Helvetica", "B", 14)
+        self.set_text_color(59, 130, 246) # Azul
+        self.cell(0, 10, sanitizar_texto(label), 0, 1, 'L')
+        self.ln(2)
+        # Linha separadora
+        self.set_draw_color(200, 200, 200)
+        self.line(10, self.get_y(), 200, self.get_y())
+        self.ln(5)
+
+    def chapter_body(self, body):
+        self.set_font("Helvetica", "", 11)
+        self.set_text_color(50, 50, 50) # Cinza Escuro para leitura
+        # Limpeza do texto
+        texto_limpo = sanitizar_texto(body)
+        self.multi_cell(0, 7, texto_limpo)
+        self.ln()
 # --- ENDPOINTS: AUTH & PERFIL ---
 
 @app.post("/auth/login")
@@ -334,7 +405,57 @@ def editar_usuario(dados: dict):
 def excluir_usuario(dados: dict):
     db.usuarios.delete_one({"usuario": dados['target_user']})
     return {"sucesso": True}
+@app.get("/analise/baixar-pdf/{usuario}")
+def baixar_pdf_completo(usuario: str):
+    user = db.usuarios.find_one({"usuario": usuario})
+    if not user or not user.get('historico_dossies'):
+        raise HTTPException(404, "Nenhum relatório encontrado.")
 
+    # Pega o último dossiê (o mais recente)
+    dossie = user['historico_dossies'][-1]
+    conteudo = dossie.get('conteudo_bruto', {})
+    
+    # Cria o PDF
+    pdf = TechnoBoltPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    
+    # Dados do Atleta
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.set_text_color(0, 0, 0)
+    pdf.cell(0, 10, sanitizar_texto(f"ATLETA: {user.get('nome', 'N/A').upper()}"), ln=True)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.cell(0, 10, f"DATA DA ANALISE: {dossie.get('data')}", ln=True)
+    pdf.ln(10)
+
+    # Seções
+    secoes = [
+        ("1. AVALIACAO ANTROPOMETRICA", conteudo.get('r1', '')),
+        ("2. PROTOCOLO NUTRICIONAL", conteudo.get('r2', '')),
+        ("3. SUPLEMENTACAO AVANCADA", conteudo.get('r3', '')),
+        ("4. PLANILHA DE TREINO", conteudo.get('r4', ''))
+    ]
+
+    for titulo, texto in secoes:
+        pdf.chapter_title(titulo)
+        pdf.chapter_body(texto)
+
+    # Gera o buffer
+    pdf_buffer = io.BytesIO()
+    pdf_output = pdf.output(dest='S') # Retorna string (latin-1)
+    
+    # Converte string latin-1 para bytes
+    if isinstance(pdf_output, str):
+        pdf_buffer.write(pdf_output.encode('latin-1'))
+    else:
+        pdf_buffer.write(pdf_output)
+        
+    pdf_buffer.seek(0)
+    
+    headers = {
+        'Content-Disposition': f'attachment; filename="TechnoBolt_Laudo_{usuario}.pdf"'
+    }
+    return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
 # --- CHAT ---
 @app.get("/chat/usuarios")
 def listar_usuarios_chat(usuario_atual: str):
