@@ -441,41 +441,52 @@ def participar_desafio(dados: dict):
 # [AJUSTE] Endpoint para listar desafios que o usuário participa
 @app.get("/social/meus-desafios")
 def listar_meus_desafios(usuario: str):
+    # Garante que campos críticos existam para evitar crash no Flutter
     desafios = list(db.desafios.find({"participantes": usuario}))
-    for d in desafios: d['_id'] = str(d['_id'])
+    for d in desafios:
+        d['_id'] = str(d['_id'])
+        if 'ranking' not in d: d['ranking'] = {usuario: 0}
+        # Garante que a lista de progresso do usuário exista
+        campo = f"progresso_{usuario}"
+        d['dias_concluidos_atleta'] = d.get(campo, [])
+    
     return {"sucesso": True, "meus_desafios": desafios}
 
+# --- [CORREÇÃO] VALIDAR DESAFIO COM IA ---
 @app.post("/social/desafio/validar-ia")
 async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...), foto_prova: UploadFile = File(...)):
     content = await foto_prova.read()
     img = otimizar_imagem(content)
     
-    prompt = "Você é um Juiz de Provas de Fitness. Analise a imagem. O usuário completou um exercício físico ou desafio de saúde? Responda APENAS 'SIM' ou 'NAO'. Se NAO, explique em 5 palavras."
+    # Prompt técnico para evitar falsos positivos
+    prompt = "Aja como juiz fitness. Na imagem, o usuario esta treinando ou comendo saudavel? Responda 'SIM' ou 'NAO'. Se NAO, curto motivo."
     res = rodar_ia(prompt, img)
     
     aprovado = res and "SIM" in res.upper()
     pontos = 10 if aprovado else 0
-    motivo = res if not aprovado else "Prova aceita."
+    motivo = res if not aprovado else "Desafio validado com sucesso!"
 
     if aprovado:
-        # 1. Atualiza Ranking e Checklist do usuário no desafio
+        # [SENIOR FIX]: Salva o progresso individualmente usando um campo dinâmico
+        # Ex: progresso_joao: [1, 2, 19]
+        campo_progresso = f"progresso_{usuario}"
         db.desafios.update_one(
             {"_id": ObjectId(id_desafio)},
             {
                 "$inc": {f"ranking.{usuario}": pontos},
-                "$addToSet": {"dias_concluidos": datetime.now().day} # Simulação de dia
+                "$addToSet": {campo_progresso: datetime.now().day} 
             }
         )
         
-        # 2. Postar no feed automaticamente
+        # Postagem automática no feed
         img_b64 = base64.b64encode(img).decode('utf-8')
         db.posts.insert_one({
             "autor": usuario,
-            "legenda": f"🏆 Cumpriu o desafio! (+{pontos}pts)",
+            "legenda": f"🔥 Validou o dia no desafio! (+{pontos} pts)",
             "imagem": img_b64,
             "data": datetime.now().isoformat(),
-            "tipo": "prova_desafio",
-            "likes": [], "comentarios": []
+            "likes": [],
+            "comentarios": [{"autor": "TechnoBolt 🤖", "texto": "Excelente forma! Continue assim."}]
         })
 
     return {"sucesso": True, "aprovado": aprovado, "pontos": pontos, "motivo": motivo}
