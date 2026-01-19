@@ -17,7 +17,7 @@ from fpdf import FPDF
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="67.0-Elite")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="68.0-Elite")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
@@ -150,6 +150,11 @@ class TechnoBoltPDF(FPDF):
 def login(dados: dict):
     user = db.usuarios.find_one({"usuario": dados['usuario'], "senha": dados['senha']})
     if not user: raise HTTPException(401, "Credenciais inválidas")
+    
+    # Bloqueio de segurança para usuários pendentes
+    if user.get("status") != "ativo" and not user.get("is_admin"):
+        raise HTTPException(403, "Sua conta está aguardando ativação pelo administrador.")
+        
     return {
         "sucesso": True,
         "dados": {
@@ -316,6 +321,22 @@ async def postar_feed(usuario: str = Form(...), legenda: str = Form(...), imagem
 
     return {"sucesso": True}
 
+# [AJUSTE] Endpoint para gravar comentários manuais
+@app.post("/social/comentar")
+def postar_comentario(dados: dict):
+    try:
+        post_id = dados.get("post_id")
+        usuario = dados.get("usuario")
+        texto = dados.get("texto")
+
+        db.posts.update_one(
+            {"_id": ObjectId(post_id)},
+            {"$push": {"comentarios": {"autor": usuario, "texto": texto, "data": datetime.now().isoformat()}}}
+        )
+        return {"sucesso": True}
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao postar comentário: {str(e)}")
+
 @app.post("/social/desafio/criar")
 def criar_desafio(dados: dict):
     prompt_validacao = f"Analise se este desafio é relacionado a saúde/fitness: '{dados['titulo']} - {dados.get('descricao')}'. Responda APENAS 'SIM' ou 'NAO'."
@@ -324,7 +345,14 @@ def criar_desafio(dados: dict):
     if not res or "SIM" not in res.upper():
         return {"sucesso": False, "mensagem": "A IA detectou que este desafio não é focado em saúde."}
 
-    novo_desafio = {**dados, "criador": dados['usuario'], "participantes": [dados['usuario']], "ranking": {dados['usuario']: 0}, "status": "ativo"}
+    novo_desafio = {
+        **dados, 
+        "criador": dados['usuario'], 
+        "participantes": [dados['usuario']], 
+        "ranking": {dados['usuario']: 0}, 
+        "status": "ativo",
+        "dias_concluidos": []
+    }
     db.desafios.insert_one(novo_desafio)
     return {"sucesso": True}
 
@@ -333,6 +361,28 @@ def listar_desafios():
     desafios = list(db.desafios.find().sort("_id", -1))
     for d in desafios: d['_id'] = str(d['_id'])
     return {"sucesso": True, "desafios": desafios}
+
+# [AJUSTE] Endpoint para participar de um desafio
+@app.post("/social/desafio/participar")
+def participar_desafio(dados: dict):
+    usuario = dados.get("usuario")
+    id_desafio = dados.get("id_desafio")
+    
+    db.desafios.update_one(
+        {"_id": ObjectId(id_desafio)},
+        {
+            "$addToSet": {"participantes": usuario},
+            "$set": {f"ranking.{usuario}": 0}
+        }
+    )
+    return {"sucesso": True}
+
+# [AJUSTE] Endpoint para listar desafios que o usuário participa
+@app.get("/social/meus-desafios")
+def listar_meus_desafios(usuario: str):
+    desafios = list(db.desafios.find({"participantes": usuario}))
+    for d in desafios: d['_id'] = str(d['_id'])
+    return {"sucesso": True, "meus_desafios": desafios}
 
 @app.post("/social/desafio/validar-ia")
 async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...), foto_prova: UploadFile = File(...)):
@@ -347,7 +397,16 @@ async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...),
     motivo = res if not aprovado else "Prova aceita."
 
     if aprovado:
-        # Postar no feed automaticamente
+        # 1. Atualiza Ranking e Checklist do usuário no desafio
+        db.desafios.update_one(
+            {"_id": ObjectId(id_desafio)},
+            {
+                "$inc": {f"ranking.{usuario}": pontos},
+                "$addToSet": {"dias_concluidos": datetime.now().day} # Simulação de dia
+            }
+        )
+        
+        # 2. Postar no feed automaticamente
         img_b64 = base64.b64encode(img).decode('utf-8')
         db.posts.insert_one({
             "autor": usuario,
@@ -402,33 +461,21 @@ def baixar_pdf_completo(usuario: str):
         if not user or not user.get('historico_dossies'):
             raise HTTPException(404, "Nenhum relatório encontrado.")
 
-        # Pega o último dossiê
         dossie = user['historico_dossies'][-1]
         raw = dossie.get('conteudo_bruto')
 
-        # --- LÓGICA DE COMPATIBILIDADE (BLINDAGEM) ---
         conteudo = {}
-        
         if isinstance(raw, dict):
-            # Formato Novo (v65+)
             conteudo = raw
         elif isinstance(raw, str):
-            # Formato Antigo (Texto puro)
-            conteudo = {
-                'r1': raw,
-                'r2': "Consulte a seção acima.",
-                'r3': "Consulte a seção acima.",
-                'r4': "Consulte a seção acima."
-            }
+            conteudo = {'r1': raw, 'r2': "Consulte a seção acima.", 'r3': "Consulte a seção acima.", 'r4': "Consulte a seção acima."}
         else:
             conteudo = {'r1': "Dados corrompidos ou ilegíveis."}
 
-        # Cria o PDF
         pdf = TechnoBoltPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
         pdf.add_page()
         
-        # Cabeçalho do Atleta
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(0, 0, 0)
         pdf.cell(0, 10, sanitizar_texto(f"ATLETA: {user.get('nome', 'N/A').upper()}"), ln=True)
@@ -436,7 +483,6 @@ def baixar_pdf_completo(usuario: str):
         pdf.cell(0, 10, f"DATA DA ANALISE: {dossie.get('data', 'N/A')}", ln=True)
         pdf.ln(10)
 
-        # Seções
         secoes = [
             ("1. AVALIACAO ANTROPOMETRICA", conteudo.get('r1') or "Dados não disponíveis."),
             ("2. PROTOCOLO NUTRICIONAL", conteudo.get('r2') or "Dados não disponíveis."),
@@ -448,11 +494,9 @@ def baixar_pdf_completo(usuario: str):
             pdf.chapter_title(titulo)
             pdf.chapter_body(str(texto))
 
-        # Gera o buffer
         pdf_buffer = io.BytesIO()
         pdf_output = pdf.output(dest='S')
         
-        # Compatibilidade fpdf (versões antigas retornam str, novas bytes)
         if isinstance(pdf_output, str):
             pdf_buffer.write(pdf_output.encode('latin-1'))
         else:
@@ -460,9 +504,7 @@ def baixar_pdf_completo(usuario: str):
             
         pdf_buffer.seek(0)
         
-        headers = {
-            'Content-Disposition': f'attachment; filename="TechnoBolt_Laudo.pdf"'
-        }
+        headers = {'Content-Disposition': f'attachment; filename="TechnoBolt_Laudo.pdf"'}
         return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
 
     except Exception as e:
