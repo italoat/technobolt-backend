@@ -407,55 +407,77 @@ def excluir_usuario(dados: dict):
     return {"sucesso": True}
 @app.get("/analise/baixar-pdf/{usuario}")
 def baixar_pdf_completo(usuario: str):
-    user = db.usuarios.find_one({"usuario": usuario})
-    if not user or not user.get('historico_dossies'):
-        raise HTTPException(404, "Nenhum relatório encontrado.")
+    try:
+        user = db.usuarios.find_one({"usuario": usuario})
+        if not user or not user.get('historico_dossies'):
+            raise HTTPException(404, "Nenhum relatório encontrado.")
 
-    # Pega o último dossiê (o mais recente)
-    dossie = user['historico_dossies'][-1]
-    conteudo = dossie.get('conteudo_bruto', {})
-    
-    # Cria o PDF
-    pdf = TechnoBoltPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    
-    # Dados do Atleta
-    pdf.set_font("Helvetica", "B", 12)
-    pdf.set_text_color(0, 0, 0)
-    pdf.cell(0, 10, sanitizar_texto(f"ATLETA: {user.get('nome', 'N/A').upper()}"), ln=True)
-    pdf.set_font("Helvetica", "", 10)
-    pdf.cell(0, 10, f"DATA DA ANALISE: {dossie.get('data')}", ln=True)
-    pdf.ln(10)
+        # Pega o último dossiê
+        dossie = user['historico_dossies'][-1]
+        raw = dossie.get('conteudo_bruto')
 
-    # Seções
-    secoes = [
-        ("1. AVALIACAO ANTROPOMETRICA", conteudo.get('r1', '')),
-        ("2. PROTOCOLO NUTRICIONAL", conteudo.get('r2', '')),
-        ("3. SUPLEMENTACAO AVANCADA", conteudo.get('r3', '')),
-        ("4. PLANILHA DE TREINO", conteudo.get('r4', ''))
-    ]
-
-    for titulo, texto in secoes:
-        pdf.chapter_title(titulo)
-        pdf.chapter_body(texto)
-
-    # Gera o buffer
-    pdf_buffer = io.BytesIO()
-    pdf_output = pdf.output(dest='S') # Retorna string (latin-1)
-    
-    # Converte string latin-1 para bytes
-    if isinstance(pdf_output, str):
-        pdf_buffer.write(pdf_output.encode('latin-1'))
-    else:
-        pdf_buffer.write(pdf_output)
+        # --- LÓGICA DE COMPATIBILIDADE (BLINDAGEM) ---
+        conteudo = {}
         
-    pdf_buffer.seek(0)
-    
-    headers = {
-        'Content-Disposition': f'attachment; filename="TechnoBolt_Laudo_{usuario}.pdf"'
-    }
-    return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
+        if isinstance(raw, dict):
+            # Formato Novo (v65+)
+            conteudo = raw
+        elif isinstance(raw, str):
+            # Formato Antigo (Texto puro)
+            # Tentamos colocar tudo na primeira seção para não perder
+            conteudo = {
+                'r1': raw,
+                'r2': "Consulte a seção acima.",
+                'r3': "Consulte a seção acima.",
+                'r4': "Consulte a seção acima."
+            }
+        else:
+            conteudo = {'r1': "Dados corrompidos ou ilegíveis."}
+
+        # Cria o PDF
+        pdf = TechnoBoltPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        
+        # Cabeçalho do Atleta
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(0, 0, 0)
+        pdf.cell(0, 10, sanitizar_texto(f"ATLETA: {user.get('nome', 'N/A').upper()}"), ln=True)
+        pdf.set_font("Helvetica", "", 10)
+        pdf.cell(0, 10, f"DATA DA ANALISE: {dossie.get('data', 'N/A')}", ln=True)
+        pdf.ln(10)
+
+        # Seções (com proteção contra Nulos)
+        secoes = [
+            ("1. AVALIACAO ANTROPOMETRICA", conteudo.get('r1') or "Dados não disponíveis."),
+            ("2. PROTOCOLO NUTRICIONAL", conteudo.get('r2') or "Dados não disponíveis."),
+            ("3. SUPLEMENTACAO AVANCADA", conteudo.get('r3') or "Dados não disponíveis."),
+            ("4. PLANILHA DE TREINO", conteudo.get('r4') or "Dados não disponíveis.")
+        ]
+
+        for titulo, texto in secoes:
+            pdf.chapter_title(titulo)
+            pdf.chapter_body(str(texto)) # Força string para evitar erro
+
+        # Gera o buffer
+        pdf_buffer = io.BytesIO()
+        pdf_output = pdf.output(dest='S')
+        
+        if isinstance(pdf_output, str):
+            pdf_buffer.write(pdf_output.encode('latin-1'))
+        else:
+            pdf_buffer.write(pdf_output)
+            
+        pdf_buffer.seek(0)
+        
+        headers = {
+            'Content-Disposition': f'attachment; filename="TechnoBolt_Laudo.pdf"'
+        }
+        return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
+
+    except Exception as e:
+        print(f"ERRO CRÍTICO PDF: {e}") # Isso vai aparecer no Log do Render
+        raise HTTPException(500, f"Erro ao gerar PDF: {str(e)}")
 # --- CHAT ---
 @app.get("/chat/usuarios")
 def listar_usuarios_chat(usuario_atual: str):
