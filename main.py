@@ -186,7 +186,27 @@ def registrar(dados: dict):
     }
     db.usuarios.insert_one(novo_user)
     return {"sucesso": True, "mensagem": "Cadastro realizado"}
-
+    
+@app.post("/social/curtir")
+def curtir_post(dados: dict):
+    try:
+        post_id = dados.get("post_id")
+        usuario = dados.get("usuario")
+        
+        post = db.posts.find_one({"_id": ObjectId(post_id)})
+        if not post:
+            return {"sucesso": False, "mensagem": "Post não encontrado"}
+            
+        # Lógica de toggle: Se já curtiu, remove. Se não, adiciona.
+        if usuario in post.get("likes", []):
+            db.posts.update_one({"_id": ObjectId(post_id)}, {"$pull": {"likes": usuario}})
+        else:
+            db.posts.update_one({"_id": ObjectId(post_id)}, {"$addToSet": {"likes": usuario}})
+            
+        return {"sucesso": True}
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao processar like: {str(e)}")
+        
 @app.post("/perfil/atualizar")
 def atualizar_perfil(dados: dict):
     db.usuarios.update_one(
