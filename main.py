@@ -172,6 +172,40 @@ def login(dados: dict):
         }
     }
 
+def calcular_medalha(username):
+    # Busca todos os desafios ativos onde o usuário participa
+    desafios = list(db.desafios.find({"participantes": username}))
+    if not desafios:
+        return ""
+
+    melhor_nivel = 4 # 1: Ouro, 2: Prata, 3: Bronze, 4: Sem Medalha
+
+    for d in desafios:
+        ranking = d.get('ranking', {})
+        if not ranking:
+            continue
+            
+        # Ordena o ranking por pontuação (maior para menor)
+        ordenados = sorted(ranking.items(), key=lambda x: x[1], reverse=True)
+        total_participantes = len(ordenados)
+        
+        try:
+            # Encontra a posição do usuário (1-indexed)
+            posicao = [i for i, (u, s) in enumerate(ordenados, 1) if u == username][0]
+            percentual = posicao / total_participantes
+
+            if percentual <= 0.20:
+                melhor_nivel = min(melhor_nivel, 1)
+            elif percentual <= 0.30:
+                melhor_nivel = min(melhor_nivel, 2)
+            else:
+                melhor_nivel = min(melhor_nivel, 3)
+        except (IndexError, ZeroDivisionError):
+            continue
+
+    # Retorna o emoji correspondente ao melhor ranking encontrado
+    mapeamento = {1: "🥇", 2: "🥈", 3: "🥉"}
+    return mapeamento.get(melhor_nivel, "")
 @app.post("/auth/registro")
 def registrar(dados: dict):
     if db.usuarios.find_one({"usuario": dados['usuario']}):
@@ -315,7 +349,11 @@ def buscar_historico(usuario: str):
 @app.get("/social/feed")
 def get_feed():
     posts = list(db.posts.find().sort("data", -1).limit(50))
-    for p in posts: p['_id'] = str(p['_id'])
+    for p in posts: 
+        p['_id'] = str(p['_id'])
+        # [AJUSTE CIRÚRGICO]: Injeta a medalha do autor em tempo real
+        p['medalha'] = calcular_medalha(p.get('autor'))
+        
     return {"sucesso": True, "feed": posts}
 
 @app.post("/social/postar")
