@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse
 from pymongo import MongoClient
 from bson.objectid import ObjectId
 import google.generativeai as genai
@@ -12,14 +13,13 @@ import base64
 import random
 import pillow_heif
 from fpdf import FPDF
-from fastapi.responses import StreamingResponse
 
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
 app = FastAPI(title="TechnoBolt Gym Hub API", version="67.0-Elite")
 
-# --- MOTORES DE IA (SEUS MODELOS ESPECÍFICOS) ---
+# --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
     "models/gemini-3-flash-preview",
     "models/gemini-2.5-flash",
@@ -41,7 +41,7 @@ def get_database():
 
 db = get_database()
 
-# --- FUNÇÕES UTILITÁRIAS ---
+# --- FUNÇÕES UTILITÁRIAS GERAIS ---
 
 def rodar_ia(prompt, imagem_bytes=None):
     # Recupera todas as chaves disponíveis no ambiente
@@ -54,7 +54,7 @@ def rodar_ia(prompt, imagem_bytes=None):
     # Tenta cada chave disponível
     for chave in chaves:
         genai.configure(api_key=chave)
-        # Tenta cada modelo na ordem de preferência (3 -> 2.5 -> 2.0 -> Latest)
+        # Tenta cada modelo na ordem de preferência
         for modelo in MOTORES_TECHNOBOLT:
             try:
                 model = genai.GenerativeModel(modelo)
@@ -63,7 +63,7 @@ def rodar_ia(prompt, imagem_bytes=None):
                 if response and response.text:
                     return response.text
             except Exception:
-                continue # Se der erro no modelo, tenta o próximo da lista
+                continue 
     return None
 
 def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
@@ -87,22 +87,8 @@ def extrair_tags(texto_ia, tag_inicio, tag_fim=None):
     
     match = re.search(padrao, texto_ia, re.DOTALL | re.IGNORECASE)
     return match.group(1).strip() if match else "Conteúdo não gerado corretamente pela IA."
-Essa é uma funcionalidade essencial para dar um tom "Premium" ao aplicativo. Para entregar um PDF formatado, profissional e com boa UX, a melhor estratégia não é gerar o PDF no celular (que é lento e limitado), mas sim gerar no Backend (Python) usando a biblioteca fpdf (que você já usava no Streamlit) e enviar para o celular apenas baixar e abrir.
 
-Aqui está a implementação completa dividida em 3 passos:
-
-📦 Passo 1: Backend (main.py) - O Motor de PDF
-Vamos criar um endpoint que desenha o PDF com design "Elite" (Cabeçalho azul, fontes limpas, layout organizado) e retorna o arquivo binário.
-
-Adicione/Substitua as importações e adicione a classe PDF e o endpoint no seu main.py:
-
-Python
-
-# --- Adicione estas importações no topo do main.py ---
-from fpdf import FPDF
-from fastapi.responses import StreamingResponse
-
-# --- CLASSE DE PDF & UTILITÁRIOS (Cole antes dos endpoints) ---
+# --- UTILITÁRIOS E CLASSE PDF ---
 
 def sanitizar_texto(texto):
     """Remove emojis e caracteres incompatíveis com Latin-1 do PDF"""
@@ -157,6 +143,7 @@ class TechnoBoltPDF(FPDF):
         texto_limpo = sanitizar_texto(body)
         self.multi_cell(0, 7, texto_limpo)
         self.ln()
+
 # --- ENDPOINTS: AUTH & PERFIL ---
 
 @app.post("/auth/login")
@@ -405,6 +392,7 @@ def editar_usuario(dados: dict):
 def excluir_usuario(dados: dict):
     db.usuarios.delete_one({"usuario": dados['target_user']})
     return {"sucesso": True}
+
 @app.get("/analise/baixar-pdf/{usuario}")
 def baixar_pdf_completo(usuario: str):
     try:
@@ -424,7 +412,6 @@ def baixar_pdf_completo(usuario: str):
             conteudo = raw
         elif isinstance(raw, str):
             # Formato Antigo (Texto puro)
-            # Tentamos colocar tudo na primeira seção para não perder
             conteudo = {
                 'r1': raw,
                 'r2': "Consulte a seção acima.",
@@ -447,7 +434,7 @@ def baixar_pdf_completo(usuario: str):
         pdf.cell(0, 10, f"DATA DA ANALISE: {dossie.get('data', 'N/A')}", ln=True)
         pdf.ln(10)
 
-        # Seções (com proteção contra Nulos)
+        # Seções
         secoes = [
             ("1. AVALIACAO ANTROPOMETRICA", conteudo.get('r1') or "Dados não disponíveis."),
             ("2. PROTOCOLO NUTRICIONAL", conteudo.get('r2') or "Dados não disponíveis."),
@@ -457,12 +444,13 @@ def baixar_pdf_completo(usuario: str):
 
         for titulo, texto in secoes:
             pdf.chapter_title(titulo)
-            pdf.chapter_body(str(texto)) # Força string para evitar erro
+            pdf.chapter_body(str(texto))
 
         # Gera o buffer
         pdf_buffer = io.BytesIO()
         pdf_output = pdf.output(dest='S')
         
+        # Compatibilidade fpdf (versões antigas retornam str, novas bytes)
         if isinstance(pdf_output, str):
             pdf_buffer.write(pdf_output.encode('latin-1'))
         else:
@@ -476,8 +464,9 @@ def baixar_pdf_completo(usuario: str):
         return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
 
     except Exception as e:
-        print(f"ERRO CRÍTICO PDF: {e}") # Isso vai aparecer no Log do Render
+        print(f"ERRO CRÍTICO PDF: {e}")
         raise HTTPException(500, f"Erro ao gerar PDF: {str(e)}")
+
 # --- CHAT ---
 @app.get("/chat/usuarios")
 def listar_usuarios_chat(usuario_atual: str):
