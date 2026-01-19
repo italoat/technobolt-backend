@@ -357,9 +357,11 @@ def criar_desafio(dados: dict):
     return {"sucesso": True}
 
 @app.get("/social/desafios")
-def listar_desafios():
-    desafios = list(db.desafios.find().sort("_id", -1))
-    for d in desafios: d['_id'] = str(d['_id'])
+def listar_desafios_disponiveis(usuario: str):
+    # Busca desafios onde o usuário NÃO está na lista de participantes
+    desafios = list(db.desafios.find({"participantes": {"$ne": usuario}}).sort("_id", -1))
+    for d in desafios: 
+        d['_id'] = str(d['_id'])
     return {"sucesso": True, "desafios": desafios}
 
 # [AJUSTE] Endpoint para participar de um desafio
@@ -368,6 +370,7 @@ def participar_desafio(dados: dict):
     usuario = dados.get("usuario")
     id_desafio = dados.get("id_desafio")
     
+    # Adiciona à lista de participantes e cria entrada no ranking com 0 pontos
     db.desafios.update_one(
         {"_id": ObjectId(id_desafio)},
         {
