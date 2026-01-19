@@ -230,6 +230,7 @@ async def executar_analise(
     OBSERVAÇÕES: {info}.
 
     RESTRITO: SEM SAUDAÇÕES OU TÍTULOS. RESPOSTA DIRETA EM LISTAS.
+    EXPLIQUE TODOS OS TERMOS TÉCNICOS ENTRE PARÊNTESES DE FORMA INTUITIVA.
     
     [AVALIACAO]
     Aja como Especialista em Cineantropometria.
