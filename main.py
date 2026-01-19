@@ -250,7 +250,8 @@ async def executar_analise(
 
     [TREINO]
     Especialista em Neuromecânica. O TREINO DEVE RESOLVER AS FALHAS DA FOTO.
-    7 DIAS EM LISTA DETALHADA.
+    7 DIAS EM LISTA DETALHADA. MÍNIMO 5 EXERCÍCIOS/DIA.
+    ESTRUTURA: Exercício (Alternativa) | Séries x Reps | Justificativa Biomecânica.
     AO FINAL: 🚀 TECHNOBOLT INSIGHT: 3 recomendações.
     """
     
