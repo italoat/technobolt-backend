@@ -17,14 +17,13 @@ from fpdf import FPDF
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="68.0-Elite")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="70.0-Elite")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
-    "models/gemini-3-flash-preview",
-    "models/gemini-2.5-flash",
     "models/gemini-2.0-flash",
-    "models/gemini-flash-latest"
+    "models/gemini-1.5-flash",
+    "models/gemini-1.5-pro"
 ]
 
 # --- CONEXÃO BANCO ---
@@ -44,17 +43,15 @@ db = get_database()
 # --- FUNÇÕES UTILITÁRIAS GERAIS ---
 
 def rodar_ia(prompt, imagem_bytes=None):
-    # Recupera todas as chaves disponíveis no ambiente
+    # Recupera chaves do ambiente
     chaves = [os.environ.get(f"GEMINI_CHAVE_{i}") for i in range(1, 8) if os.environ.get(f"GEMINI_CHAVE_{i}")]
     img_blob = {"mime_type": "image/jpeg", "data": imagem_bytes} if imagem_bytes else None
     
-    # Embaralha as chaves para distribuir a carga
+    # Embaralha para balanceamento de carga
     random.shuffle(chaves)
     
-    # Tenta cada chave disponível
     for chave in chaves:
         genai.configure(api_key=chave)
-        # Tenta cada modelo na ordem de preferência
         for modelo in MOTORES_TECHNOBOLT:
             try:
                 model = genai.GenerativeModel(modelo)
@@ -88,33 +85,24 @@ def extrair_tags(texto_ia, tag_inicio, tag_fim=None):
     match = re.search(padrao, texto_ia, re.DOTALL | re.IGNORECASE)
     return match.group(1).strip() if match else "Conteúdo não gerado corretamente pela IA."
 
-# --- UTILITÁRIOS E CLASSE PDF ---
+# --- PDF GENERATOR ---
 
 def sanitizar_texto(texto):
     """Remove emojis e caracteres incompatíveis com Latin-1 do PDF"""
     if not texto: return ""
-    # Substituições manuais para evitar erros de encode
     texto = texto.replace("🚀", ">>").replace("✅", "[OK]").replace("⚠️", "[!]")
     texto = texto.replace("💊", "").replace("🥗", "").replace("🏋️", "").replace("📊", "")
-    # Remove asteriscos de markdown
     texto = texto.replace("**", "").replace("###", "").replace("##", "")
-    
-    # Tenta codificar para latin-1, ignorando o que não consegue
     return texto.encode('latin-1', 'replace').decode('latin-1')
 
 class TechnoBoltPDF(FPDF):
     def header(self):
-        # Fundo do cabeçalho
-        self.set_fill_color(13, 13, 13) # Preto Quase Puro
+        self.set_fill_color(13, 13, 13)
         self.rect(0, 0, 210, 40, 'F')
-        
-        # Título
         self.set_xy(10, 10)
         self.set_font("Helvetica", "B", 20)
-        self.set_text_color(59, 130, 246) # Azul TechnoBolt (#3B82F6)
+        self.set_text_color(59, 130, 246)
         self.cell(0, 10, "TECHNOBOLT GYM HUB", ln=True, align='L')
-        
-        # Subtítulo
         self.set_font("Helvetica", "I", 9)
         self.set_text_color(200, 200, 200)
         self.cell(0, 5, "RELATORIO DE ALTA PERFORMANCE | PHP PROTOCOL", ln=True, align='L')
@@ -128,21 +116,54 @@ class TechnoBoltPDF(FPDF):
 
     def chapter_title(self, label):
         self.set_font("Helvetica", "B", 14)
-        self.set_text_color(59, 130, 246) # Azul
+        self.set_text_color(59, 130, 246)
         self.cell(0, 10, sanitizar_texto(label), 0, 1, 'L')
         self.ln(2)
-        # Linha separadora
         self.set_draw_color(200, 200, 200)
         self.line(10, self.get_y(), 200, self.get_y())
         self.ln(5)
 
     def chapter_body(self, body):
         self.set_font("Helvetica", "", 11)
-        self.set_text_color(50, 50, 50) # Cinza Escuro para leitura
-        # Limpeza do texto
+        self.set_text_color(50, 50, 50)
         texto_limpo = sanitizar_texto(body)
         self.multi_cell(0, 7, texto_limpo)
         self.ln()
+
+# --- FUNÇÕES AUXILIARES DE NEGÓCIO ---
+
+def calcular_medalha(username):
+    # Lógica robusta para evitar erro se ranking for vazio
+    try:
+        desafios = list(db.desafios.find({"participantes": username}))
+        if not desafios: return ""
+
+        melhor_nivel = 4 
+
+        for d in desafios:
+            ranking = d.get('ranking', {})
+            if not ranking: continue
+            
+            ordenados = sorted(ranking.items(), key=lambda x: x[1], reverse=True)
+            total_participantes = len(ordenados)
+            
+            if total_participantes == 0: continue
+
+            try:
+                # Encontra posição (1-based)
+                posicao = [i for i, (u, s) in enumerate(ordenados, 1) if u == username][0]
+                percentual = posicao / total_participantes
+
+                if percentual <= 0.20: melhor_nivel = min(melhor_nivel, 1)
+                elif percentual <= 0.30: melhor_nivel = min(melhor_nivel, 2)
+                else: melhor_nivel = min(melhor_nivel, 3)
+            except IndexError:
+                continue
+
+        mapeamento = {1: "🥇", 2: "🥈", 3: "🥉"}
+        return mapeamento.get(melhor_nivel, "")
+    except Exception:
+        return ""
 
 # --- ENDPOINTS: AUTH & PERFIL ---
 
@@ -151,7 +172,6 @@ def login(dados: dict):
     user = db.usuarios.find_one({"usuario": dados['usuario'], "senha": dados['senha']})
     if not user: raise HTTPException(401, "Credenciais inválidas")
     
-    # Bloqueio de segurança para usuários pendentes
     if user.get("status") != "ativo" and not user.get("is_admin"):
         raise HTTPException(403, "Sua conta está aguardando ativação pelo administrador.")
         
@@ -172,40 +192,6 @@ def login(dados: dict):
         }
     }
 
-def calcular_medalha(username):
-    # Busca todos os desafios ativos onde o usuário participa
-    desafios = list(db.desafios.find({"participantes": username}))
-    if not desafios:
-        return ""
-
-    melhor_nivel = 4 # 1: Ouro, 2: Prata, 3: Bronze, 4: Sem Medalha
-
-    for d in desafios:
-        ranking = d.get('ranking', {})
-        if not ranking:
-            continue
-            
-        # Ordena o ranking por pontuação (maior para menor)
-        ordenados = sorted(ranking.items(), key=lambda x: x[1], reverse=True)
-        total_participantes = len(ordenados)
-        
-        try:
-            # Encontra a posição do usuário (1-indexed)
-            posicao = [i for i, (u, s) in enumerate(ordenados, 1) if u == username][0]
-            percentual = posicao / total_participantes
-
-            if percentual <= 0.20:
-                melhor_nivel = min(melhor_nivel, 1)
-            elif percentual <= 0.30:
-                melhor_nivel = min(melhor_nivel, 2)
-            else:
-                melhor_nivel = min(melhor_nivel, 3)
-        except (IndexError, ZeroDivisionError):
-            continue
-
-    # Retorna o emoji correspondente ao melhor ranking encontrado
-    mapeamento = {1: "🥇", 2: "🥈", 3: "🥉"}
-    return mapeamento.get(melhor_nivel, "")
 @app.post("/auth/registro")
 def registrar(dados: dict):
     if db.usuarios.find_one({"usuario": dados['usuario']}):
@@ -221,26 +207,6 @@ def registrar(dados: dict):
     db.usuarios.insert_one(novo_user)
     return {"sucesso": True, "mensagem": "Cadastro realizado"}
     
-@app.post("/social/curtir")
-def curtir_post(dados: dict):
-    try:
-        post_id = dados.get("post_id")
-        usuario = dados.get("usuario")
-        
-        post = db.posts.find_one({"_id": ObjectId(post_id)})
-        if not post:
-            return {"sucesso": False, "mensagem": "Post não encontrado"}
-            
-        # Lógica de toggle: Se já curtiu, remove. Se não, adiciona.
-        if usuario in post.get("likes", []):
-            db.posts.update_one({"_id": ObjectId(post_id)}, {"$pull": {"likes": usuario}})
-        else:
-            db.posts.update_one({"_id": ObjectId(post_id)}, {"$addToSet": {"likes": usuario}})
-            
-        return {"sucesso": True}
-    except Exception as e:
-        raise HTTPException(500, f"Erro ao processar like: {str(e)}")
-        
 @app.post("/perfil/atualizar")
 def atualizar_perfil(dados: dict):
     db.usuarios.update_one(
@@ -275,7 +241,6 @@ async def executar_analise(
     r_f = user_data.get('restricoes_fis', 'Nenhuma')
     info = user_data.get('info_add', '')
 
-    # Atualiza dados básicos
     db.usuarios.update_one({"usuario": usuario}, {"$set": {"nome": nome_completo, "peso": peso, "altura": altura, "genero": genero}})
     
     content = await foto.read()
@@ -344,14 +309,18 @@ def buscar_historico(usuario: str):
     if not user: return {"sucesso": True, "historico": []}
     return {"sucesso": True, "historico": user.get('historico_dossies', [])}
 
-# --- ENDPOINTS: SOCIAL E DESAFIOS ---
+# --- ENDPOINTS: SOCIAL E DESAFIOS (CORRIGIDOS) ---
 
 @app.get("/social/feed")
 def get_feed():
+    # Ordena por data decrescente
     posts = list(db.posts.find().sort("data", -1).limit(50))
     for p in posts: 
         p['_id'] = str(p['_id'])
-        # [AJUSTE CIRÚRGICO]: Injeta a medalha do autor em tempo real
+        # [CORREÇÃO]: Garante que listas não sejam nulas para o Flutter
+        p['likes'] = p.get('likes', [])
+        p['comentarios'] = p.get('comentarios', [])
+        # Injeta medalha
         p['medalha'] = calcular_medalha(p.get('autor'))
         
     return {"sucesso": True, "feed": posts}
@@ -379,7 +348,24 @@ async def postar_feed(usuario: str = Form(...), legenda: str = Form(...), imagem
 
     return {"sucesso": True}
 
-# [AJUSTE] Endpoint para gravar comentários manuais
+@app.post("/social/curtir")
+def curtir_post(dados: dict):
+    try:
+        post_id = dados.get("post_id")
+        usuario = dados.get("usuario")
+        
+        post = db.posts.find_one({"_id": ObjectId(post_id)})
+        if not post: return {"sucesso": False, "mensagem": "Post não encontrado"}
+            
+        if usuario in post.get("likes", []):
+            db.posts.update_one({"_id": ObjectId(post_id)}, {"$pull": {"likes": usuario}})
+        else:
+            db.posts.update_one({"_id": ObjectId(post_id)}, {"$addToSet": {"likes": usuario}})
+            
+        return {"sucesso": True}
+    except Exception as e:
+        raise HTTPException(500, f"Erro ao processar like: {str(e)}")
+        
 @app.post("/social/comentar")
 def postar_comentario(dados: dict):
     try:
@@ -408,27 +394,24 @@ def criar_desafio(dados: dict):
         "criador": dados['usuario'], 
         "participantes": [dados['usuario']], 
         "ranking": {dados['usuario']: 0}, 
-        "status": "ativo",
-        "dias_concluidos": []
+        "status": "ativo"
     }
     db.desafios.insert_one(novo_desafio)
     return {"sucesso": True}
 
 @app.get("/social/desafios")
 def listar_desafios_disponiveis(usuario: str):
-    # Busca desafios onde o usuário NÃO está na lista de participantes
+    # Retorna desafios onde o usuário NÃO está participando
     desafios = list(db.desafios.find({"participantes": {"$ne": usuario}}).sort("_id", -1))
     for d in desafios: 
         d['_id'] = str(d['_id'])
     return {"sucesso": True, "desafios": desafios}
 
-# [AJUSTE] Endpoint para participar de um desafio
 @app.post("/social/desafio/participar")
 def participar_desafio(dados: dict):
     usuario = dados.get("usuario")
     id_desafio = dados.get("id_desafio")
     
-    # Adiciona à lista de participantes e cria entrada no ranking com 0 pontos
     db.desafios.update_one(
         {"_id": ObjectId(id_desafio)},
         {
@@ -438,27 +421,26 @@ def participar_desafio(dados: dict):
     )
     return {"sucesso": True}
 
-# [AJUSTE] Endpoint para listar desafios que o usuário participa
 @app.get("/social/meus-desafios")
 def listar_meus_desafios(usuario: str):
-    # Garante que campos críticos existam para evitar crash no Flutter
+    # [SENIOR FIX]: Injeção do progresso individual no retorno da API
+    # Isso permite que cada usuário veja APENAS o seu próprio checklist
     desafios = list(db.desafios.find({"participantes": usuario}))
     for d in desafios:
         d['_id'] = str(d['_id'])
         if 'ranking' not in d: d['ranking'] = {usuario: 0}
-        # Garante que a lista de progresso do usuário exista
-        campo = f"progresso_{usuario}"
-        d['dias_concluidos_atleta'] = d.get(campo, [])
+        
+        # Campo dinâmico: progresso_{usuario}
+        campo_progresso = f"progresso_{usuario}"
+        d['dias_concluidos_atleta'] = d.get(campo_progresso, [])
     
     return {"sucesso": True, "meus_desafios": desafios}
 
-# --- [CORREÇÃO] VALIDAR DESAFIO COM IA ---
 @app.post("/social/desafio/validar-ia")
 async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...), foto_prova: UploadFile = File(...)):
     content = await foto_prova.read()
     img = otimizar_imagem(content)
     
-    # Prompt técnico para evitar falsos positivos
     prompt = "Aja como juiz fitness. Na imagem, o usuario esta treinando ou comendo saudavel? Responda 'SIM' ou 'NAO'. Se NAO, curto motivo."
     res = rodar_ia(prompt, img)
     
@@ -467,8 +449,7 @@ async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...),
     motivo = res if not aprovado else "Desafio validado com sucesso!"
 
     if aprovado:
-        # [SENIOR FIX]: Salva o progresso individualmente usando um campo dinâmico
-        # Ex: progresso_joao: [1, 2, 19]
+        # [SENIOR FIX]: Salva o progresso na chave específica do usuário
         campo_progresso = f"progresso_{usuario}"
         db.desafios.update_one(
             {"_id": ObjectId(id_desafio)},
@@ -478,20 +459,20 @@ async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...),
             }
         )
         
-        # Postagem automática no feed
         img_b64 = base64.b64encode(img).decode('utf-8')
         db.posts.insert_one({
             "autor": usuario,
             "legenda": f"🔥 Validou o dia no desafio! (+{pontos} pts)",
             "imagem": img_b64,
             "data": datetime.now().isoformat(),
+            "tipo": "prova_desafio",
             "likes": [],
             "comentarios": [{"autor": "TechnoBolt 🤖", "texto": "Excelente forma! Continue assim."}]
         })
 
     return {"sucesso": True, "aprovado": aprovado, "pontos": pontos, "motivo": motivo}
 
-# --- ENDPOINTS: ADMIN & SETUP ---
+# --- ENDPOINTS: ADMIN & PDF ---
 
 @app.get("/setup/criar-admin")
 def criar_admin_inicial():
@@ -540,9 +521,9 @@ def baixar_pdf_completo(usuario: str):
         if isinstance(raw, dict):
             conteudo = raw
         elif isinstance(raw, str):
-            conteudo = {'r1': raw, 'r2': "Consulte a seção acima.", 'r3': "Consulte a seção acima.", 'r4': "Consulte a seção acima."}
+            conteudo = {'r1': raw, 'r2': "...", 'r3': "...", 'r4': "..."}
         else:
-            conteudo = {'r1': "Dados corrompidos ou ilegíveis."}
+            conteudo = {'r1': "Dados ilegíveis."}
 
         pdf = TechnoBoltPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
@@ -556,15 +537,15 @@ def baixar_pdf_completo(usuario: str):
         pdf.ln(10)
 
         secoes = [
-            ("1. AVALIACAO ANTROPOMETRICA", conteudo.get('r1') or "Dados não disponíveis."),
-            ("2. PROTOCOLO NUTRICIONAL", conteudo.get('r2') or "Dados não disponíveis."),
-            ("3. SUPLEMENTACAO AVANCADA", conteudo.get('r3') or "Dados não disponíveis."),
-            ("4. PLANILHA DE TREINO", conteudo.get('r4') or "Dados não disponíveis.")
+            ("1. AVALIACAO ANTROPOMETRICA", conteudo.get('r1')),
+            ("2. PROTOCOLO NUTRICIONAL", conteudo.get('r2')),
+            ("3. SUPLEMENTACAO AVANCADA", conteudo.get('r3')),
+            ("4. PLANILHA DE TREINO", conteudo.get('r4'))
         ]
 
         for titulo, texto in secoes:
             pdf.chapter_title(titulo)
-            pdf.chapter_body(str(texto))
+            pdf.chapter_body(str(texto or "Sem dados."))
 
         pdf_buffer = io.BytesIO()
         pdf_output = pdf.output(dest='S')
