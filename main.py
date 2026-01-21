@@ -348,7 +348,36 @@ async def postar_feed(usuario: str = Form(...), legenda: str = Form(...), imagem
         db.posts.update_one({"_id": post_id}, {"$push": {"comentarios": {"autor": "TechnoBolt AI 🤖", "texto": comentario_ia}}})
 
     return {"sucesso": True}
+# Adicione este endpoint no seu main.py, junto com os outros endpoints sociais
 
+@app.post("/social/post/deletar")
+def deletar_post_social(dados: dict):
+    try:
+        post_id = dados.get("post_id")
+        usuario = dados.get("usuario")
+        
+        if not post_id or not usuario:
+            return {"sucesso": False, "mensagem": "Dados incompletos"}
+
+        # [CORREÇÃO CRÍTICA]: Converter String para ObjectId
+        try:
+            oid = ObjectId(post_id)
+        except Exception:
+            return {"sucesso": False, "mensagem": "ID de post inválido"}
+
+        # Verifica se o post é do usuário antes de deletar (Segurança)
+        result = db.posts.delete_one({"_id": oid, "autor": usuario})
+
+        if result.deleted_count > 0:
+            return {"sucesso": True, "mensagem": "Post deletado"}
+        else:
+            # Se chegou aqui, o ID não existe OU o usuário não é o dono
+            return {"sucesso": False, "mensagem": "Post não encontrado ou sem permissão."}
+            
+    except Exception as e:
+        print(f"Erro delete: {e}")
+        return {"sucesso": False, "mensagem": f"Erro interno: {str(e)}"}
+        
 @app.post("/social/curtir")
 def curtir_post(dados: dict):
     try:
