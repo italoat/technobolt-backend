@@ -21,9 +21,10 @@ app = FastAPI(title="TechnoBolt Gym Hub API", version="70.0-Elite")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
+    "models/gemini-3-flash-preview",
+    "models/gemini-2.5-flash",
     "models/gemini-2.0-flash",
-    "models/gemini-1.5-flash",
-    "models/gemini-1.5-pro"
+    "models/gemini-flash-latest"
 ]
 
 # --- CONEXÃO BANCO ---
