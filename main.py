@@ -7,6 +7,7 @@ from PIL import Image, ImageOps
 import io
 import os
 import re
+import json
 import urllib.parse
 from datetime import datetime
 import base64
@@ -17,14 +18,13 @@ from fpdf import FPDF
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="70.0-Elite")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="71.0-Elite-JSON")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
-    "models/gemini-3-flash-preview",
-    "models/gemini-2.5-flash",
     "models/gemini-2.0-flash",
-    "models/gemini-flash-latest"
+    "models/gemini-1.5-flash",
+    "models/gemini-1.5-pro"
 ]
 
 # --- CONEXÃO BANCO ---
@@ -56,13 +56,37 @@ def rodar_ia(prompt, imagem_bytes=None):
         for modelo in MOTORES_TECHNOBOLT:
             try:
                 model = genai.GenerativeModel(modelo)
+                # Configuração para forçar JSON (quando suportado pelo modelo) ou texto limpo
+                generation_config = {"response_mime_type": "application/json"} if "json" in prompt.lower() else None
+                
                 inputs = [prompt, img_blob] if img_blob else [prompt]
-                response = model.generate_content(inputs)
+                
+                if generation_config:
+                    response = model.generate_content(inputs, generation_config=generation_config)
+                else:
+                    response = model.generate_content(inputs)
+
                 if response and response.text:
                     return response.text
-            except Exception:
+            except Exception as e:
+                print(f"Erro IA ({modelo}): {e}")
                 continue 
     return None
+
+def limpar_e_parsear_json(texto_ia):
+    """Limpa blocos de código markdown e converte para dict"""
+    try:
+        texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
+        return json.loads(texto_limpo)
+    except Exception as e:
+        print(f"Erro ao parsear JSON da IA: {e}")
+        # Retorna estrutura vazia para não quebrar o app
+        return {
+            "avaliacao": {"insight": "Erro na IA"},
+            "dieta": [],
+            "suplementacao": [],
+            "treino": []
+        }
 
 def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     try:
@@ -75,26 +99,41 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     except Exception:
         return file_bytes
 
-def extrair_tags(texto_ia, tag_inicio, tag_fim=None):
-    t_i = tag_inicio.replace('[', '\\[').replace(']', '\\]')
-    if tag_fim:
-        t_f = tag_fim.replace('[', '\\[').replace(']', '\\]')
-        padrao = f"{t_i}\\s*(.*?)\\s*(?={t_f}|$)"
-    else:
-        padrao = f"{t_i}\\s*(.*)"
-    
-    match = re.search(padrao, texto_ia, re.DOTALL | re.IGNORECASE)
-    return match.group(1).strip() if match else "Conteúdo não gerado corretamente pela IA."
-
-# --- PDF GENERATOR ---
+# --- PDF GENERATOR (ATUALIZADO PARA JSON) ---
 
 def sanitizar_texto(texto):
     """Remove emojis e caracteres incompatíveis com Latin-1 do PDF"""
     if not texto: return ""
+    if not isinstance(texto, str): texto = str(texto)
     texto = texto.replace("🚀", ">>").replace("✅", "[OK]").replace("⚠️", "[!]")
     texto = texto.replace("💊", "").replace("🥗", "").replace("🏋️", "").replace("📊", "")
     texto = texto.replace("**", "").replace("###", "").replace("##", "")
     return texto.encode('latin-1', 'replace').decode('latin-1')
+
+def converter_json_para_texto(dados, tipo):
+    """Converte a estrutura JSON em texto corrido para o PDF"""
+    texto = ""
+    if tipo == "dieta":
+        for item in dados:
+            texto += f"\n[{item.get('dia', 'Dia')}]\n"
+            texto += f"Refeicoes: {item.get('refeicoes', '')}\n"
+            texto += f"Macros: {item.get('macros', '')}\n"
+            texto += "-" * 40 + "\n"
+    elif tipo == "treino":
+        for item in dados:
+            texto += f"\n[{item.get('dia', 'Dia')}] - {item.get('titulo', '')}\n"
+            texto += f"Detalhes: {item.get('detalhe', '')}\n"
+            texto += "-" * 40 + "\n"
+    elif tipo == "suplementos":
+        for item in dados:
+            texto += f"Item: {item.get('titulo', '')}\n"
+            texto += f"Uso: {item.get('detalhe', '')}\n\n"
+    elif tipo == "avaliacao":
+         texto += f"Tronco: {dados.get('segmentacao', {}).get('tronco', '')}\n"
+         texto += f"Membros Sup: {dados.get('segmentacao', {}).get('superior', '')}\n"
+         texto += f"Membros Inf: {dados.get('segmentacao', {}).get('inferior', '')}\n"
+    
+    return texto
 
 class TechnoBoltPDF(FPDF):
     def header(self):
@@ -134,7 +173,6 @@ class TechnoBoltPDF(FPDF):
 # --- FUNÇÕES AUXILIARES DE NEGÓCIO ---
 
 def calcular_medalha(username):
-    # Lógica robusta para evitar erro se ranking for vazio
     try:
         desafios = list(db.desafios.find({"participantes": username}))
         if not desafios: return ""
@@ -151,7 +189,6 @@ def calcular_medalha(username):
             if total_participantes == 0: continue
 
             try:
-                # Encontra posição (1-based)
                 posicao = [i for i, (u, s) in enumerate(ordenados, 1) if u == username][0]
                 percentual = posicao / total_participantes
 
@@ -224,7 +261,7 @@ def atualizar_perfil(dados: dict):
     )
     return {"sucesso": True}
 
-# --- ENDPOINTS: ANÁLISE ---
+# --- ENDPOINTS: ANÁLISE (REFATORADO PARA JSON) ---
 
 @app.post("/analise/executar")
 async def executar_analise(
@@ -248,53 +285,81 @@ async def executar_analise(
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    prompt_mestre = f"""VOCÊ É UM CONSELHO TÉCNICO DE ESPECIALISTAS DE ELITE DA TECHNOBOLT GYM.
-    ATLETA: {nome_completo} | GÊNERO: {genero} | IMC: {imc:.2f}.
-    META: {objetivo}. 
-    RESTRIÇÕES: {r_a}, {r_m}, {r_f}.
-    OBSERVAÇÕES: {info}.
+    # [NOVO PROMPT ESTRUTURADO PARA JSON]
+    prompt_mestre = f"""
+    ATLETA: {nome_completo} ({genero}), IMC {imc:.2f}. META: {objetivo}.
+    RESTRIÇÕES: {r_a}, {r_m}, {r_f}. OBS: {info}.
 
-    RESTRITO: SEM SAUDAÇÕES OU TÍTULOS. RESPOSTA DIRETA EM LISTAS.
-    EXPLIQUE TODOS OS TERMOS TÉCNICOS ENTRE PARÊNTESES DE FORMA INTUITIVA.
+    Aja como um conselho de especialistas da TechnoBolt.
+    Analise a foto do corpo e os dados.
     
-    [AVALIACAO]
-    Aja como Especialista em Cineantropometria.
-    1. SEGMENTAÇÃO CORPORAL (PONTOS DE ATENÇÃO):
-    - Tronco e Cabeça.
-    - Membros Superiores.
-    - Membros Inferiores.
-    2. ESTIMATIVA DE DOBRAS CUTÂNEAS.
-    AO FINAL: 🚀 TECHNOBOLT INSIGHT: 3 recomendações técnicas.
+    ⚠️ IMPORTANTE: VOCÊ DEVE RETORNAR APENAS UM OBJETO JSON VÁLIDO.
+    NÃO USE MARKDOWN. A ESTRUTURA DEVE SER EXATAMENTE ESTA:
 
-    [NUTRICAO]
-    Especialista em Nutrogenômica. Plano dietético extenso.
-    AO FINAL: 🚀 TECHNOBOLT INSIGHT: 3 recomendações.
-
-    [SUPLEMENTACAO]
-    Especialista Ortomolecular. 3-10 itens via Nexo Metabólico.
-    AO FINAL: 🚀 TECHNOBOLT INSIGHT: 3 recomendações.
-
-    [TREINO]
-    Especialista em Neuromecânica. O TREINO DEVE RESOLVER AS FALHAS DA FOTO.
-    7 DIAS EM LISTA DETALHADA. MÍNIMO 5 EXERCÍCIOS/DIA.
-    ESTRUTURA: Exercício (Alternativa) | Séries x Reps | Justificativa Biomecânica.
-    AO FINAL: 🚀 TECHNOBOLT INSIGHT: 3 recomendações.
+    {{
+      "avaliacao": {{
+        "segmentacao": {{
+          "tronco": "Texto curto sobre tronco/cabeça",
+          "superior": "Texto curto sobre braços/ombros",
+          "inferior": "Texto curto sobre pernas"
+        }},
+        "dobras": {{
+          "abdominal": "Texto estimativa",
+          "suprailiaca": "Texto estimativa",
+          "peitoral": "Texto estimativa"
+        }},
+        "insight": "3 recomendações técnicas de avaliação"
+      }},
+      "dieta": [
+        {{ "dia": "Segunda", "refeicoes": "Resumo das 3 opções", "macros": "Resumo macros" }},
+        {{ "dia": "Terça", "refeicoes": "...", "macros": "..." }},
+        {{ "dia": "Quarta", "refeicoes": "...", "macros": "..." }},
+        {{ "dia": "Quinta", "refeicoes": "...", "macros": "..." }},
+        {{ "dia": "Sexta", "refeicoes": "...", "macros": "..." }},
+        {{ "dia": "Sábado", "refeicoes": "...", "macros": "..." }},
+        {{ "dia": "Domingo", "refeicoes": "...", "macros": "..." }}
+      ],
+      "dieta_insight": "Insight nutricional geral",
+      "suplementacao": [
+        {{ "titulo": "Nome Suplemento", "detalhe": "Motivo, dosagem e como tomar" }},
+        {{ "titulo": "Nome Suplemento 2", "detalhe": "..." }},
+        {{ "titulo": "Nome Suplemento 3", "detalhe": "..." }}
+      ],
+      "suplementacao_insight": "Insight ortomolecular",
+      "treino": [
+        {{ "dia": "Segunda", "titulo": "Grupo Muscular (ex: Peito)", "detalhe": "Lista de exercicios resumida" }},
+        {{ "dia": "Terça", "titulo": "...", "detalhe": "..." }},
+        {{ "dia": "Quarta", "titulo": "...", "detalhe": "..." }},
+        {{ "dia": "Quinta", "titulo": "...", "detalhe": "..." }},
+        {{ "dia": "Sexta", "titulo": "...", "detalhe": "..." }},
+        {{ "dia": "Sábado", "titulo": "...", "detalhe": "..." }},
+        {{ "dia": "Domingo", "titulo": "...", "detalhe": "..." }}
+      ],
+      "treino_insight": "Insight biomecânico"
+    }}
     """
     
-    resultado_texto = rodar_ia(prompt_mestre, img_otimizada)
+    resultado_raw = rodar_ia(prompt_mestre, img_otimizada)
     
-    if not resultado_texto:
+    if not resultado_raw:
         raise HTTPException(503, "IA Indisponível.")
 
-    r1 = extrair_tags(resultado_texto, "[AVALIACAO]", "[NUTRICAO]")
-    r2 = extrair_tags(resultado_texto, "[NUTRICAO]", "[SUPLEMENTACAO]")
-    r3 = extrair_tags(resultado_texto, "[SUPLEMENTACAO]", "[TREINO]")
-    r4 = extrair_tags(resultado_texto, "[TREINO]")
+    # Parseia o JSON
+    conteudo_json = limpar_e_parsear_json(resultado_raw)
 
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "peso_reg": peso,
-        "conteudo_bruto": {"r1": r1, "r2": r2, "r3": r3, "r4": r4, "full_text": resultado_texto}
+        "conteudo_bruto": {
+            # Mapeamos para as chaves que o Flutter espera (r1, r2...), mas agora enviando JSON ou Texto formatado
+            # Para o Flutter novo, vamos enviar o JSON completo na chave 'json_full'
+            "json_full": conteudo_json,
+            # Mantemos compatibilidade parcial caso precise
+            "r1": conteudo_json.get('avaliacao', {}).get('insight', ''),
+            "r2": conteudo_json.get('dieta_insight', ''),
+            "r3": conteudo_json.get('suplementacao_insight', ''),
+            "r4": conteudo_json.get('treino_insight', '')
+        }
     }
     
     if not user_data.get('is_admin', False):
@@ -308,20 +373,23 @@ async def executar_analise(
 def buscar_historico(usuario: str):
     user = db.usuarios.find_one({"usuario": usuario})
     if not user: return {"sucesso": True, "historico": []}
-    return {"sucesso": True, "historico": user.get('historico_dossies', [])}
+    
+    # Processamento para garantir que o front receba dados compatíveis
+    historico = user.get('historico_dossies', [])
+    
+    # Adaptação retroativa: Se for JSON novo, formata para o front antigo se necessário
+    # (Mas como você atualizou o front, ele vai ler o json_full se existir)
+    return {"sucesso": True, "historico": historico}
 
-# --- ENDPOINTS: SOCIAL E DESAFIOS (CORRIGIDOS) ---
+# --- ENDPOINTS: SOCIAL E DESAFIOS ---
 
 @app.get("/social/feed")
 def get_feed():
-    # Ordena por data decrescente
     posts = list(db.posts.find().sort("data", -1).limit(50))
     for p in posts: 
         p['_id'] = str(p['_id'])
-        # [CORREÇÃO]: Garante que listas não sejam nulas para o Flutter
         p['likes'] = p.get('likes', [])
         p['comentarios'] = p.get('comentarios', [])
-        # Injeta medalha
         p['medalha'] = calcular_medalha(p.get('autor'))
         
     return {"sucesso": True, "feed": posts}
@@ -348,7 +416,6 @@ async def postar_feed(usuario: str = Form(...), legenda: str = Form(...), imagem
         db.posts.update_one({"_id": post_id}, {"$push": {"comentarios": {"autor": "TechnoBolt AI 🤖", "texto": comentario_ia}}})
 
     return {"sucesso": True}
-# Adicione este endpoint no seu main.py, junto com os outros endpoints sociais
 
 @app.post("/social/post/deletar")
 def deletar_post_social(dados: dict):
@@ -359,19 +426,16 @@ def deletar_post_social(dados: dict):
         if not post_id or not usuario:
             return {"sucesso": False, "mensagem": "Dados incompletos"}
 
-        # [CORREÇÃO CRÍTICA]: Converter String para ObjectId
         try:
             oid = ObjectId(post_id)
         except Exception:
             return {"sucesso": False, "mensagem": "ID de post inválido"}
 
-        # Verifica se o post é do usuário antes de deletar (Segurança)
         result = db.posts.delete_one({"_id": oid, "autor": usuario})
 
         if result.deleted_count > 0:
             return {"sucesso": True, "mensagem": "Post deletado"}
         else:
-            # Se chegou aqui, o ID não existe OU o usuário não é o dono
             return {"sucesso": False, "mensagem": "Post não encontrado ou sem permissão."}
             
     except Exception as e:
@@ -431,7 +495,6 @@ def criar_desafio(dados: dict):
 
 @app.get("/social/desafios")
 def listar_desafios_disponiveis(usuario: str):
-    # Retorna desafios onde o usuário NÃO está participando
     desafios = list(db.desafios.find({"participantes": {"$ne": usuario}}).sort("_id", -1))
     for d in desafios: 
         d['_id'] = str(d['_id'])
@@ -453,14 +516,11 @@ def participar_desafio(dados: dict):
 
 @app.get("/social/meus-desafios")
 def listar_meus_desafios(usuario: str):
-    # [SENIOR FIX]: Injeção do progresso individual no retorno da API
-    # Isso permite que cada usuário veja APENAS o seu próprio checklist
     desafios = list(db.desafios.find({"participantes": usuario}))
     for d in desafios:
         d['_id'] = str(d['_id'])
         if 'ranking' not in d: d['ranking'] = {usuario: 0}
         
-        # Campo dinâmico: progresso_{usuario}
         campo_progresso = f"progresso_{usuario}"
         d['dias_concluidos_atleta'] = d.get(campo_progresso, [])
     
@@ -479,7 +539,6 @@ async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...),
     motivo = res if not aprovado else "Desafio validado com sucesso!"
 
     if aprovado:
-        # [SENIOR FIX]: Salva o progresso na chave específica do usuário
         campo_progresso = f"progresso_{usuario}"
         db.desafios.update_one(
             {"_id": ObjectId(id_desafio)},
@@ -545,15 +604,21 @@ def baixar_pdf_completo(usuario: str):
             raise HTTPException(404, "Nenhum relatório encontrado.")
 
         dossie = user['historico_dossies'][-1]
-        raw = dossie.get('conteudo_bruto')
+        raw = dossie.get('conteudo_bruto', {})
 
-        conteudo = {}
-        if isinstance(raw, dict):
-            conteudo = raw
-        elif isinstance(raw, str):
-            conteudo = {'r1': raw, 'r2': "...", 'r3': "...", 'r4': "..."}
+        # Verifica se temos o novo formato JSON ou o antigo Texto
+        if 'json_full' in raw and isinstance(raw['json_full'], dict):
+            json_data = raw['json_full']
+            r1_txt = converter_json_para_texto(json_data.get('avaliacao'), "avaliacao") + "\n" + json_data.get('avaliacao', {}).get('insight', '')
+            r2_txt = converter_json_para_texto(json_data.get('dieta'), "dieta") + "\n" + json_data.get('dieta_insight', '')
+            r3_txt = converter_json_para_texto(json_data.get('suplementacao'), "suplementos") + "\n" + json_data.get('suplementacao_insight', '')
+            r4_txt = converter_json_para_texto(json_data.get('treino'), "treino") + "\n" + json_data.get('treino_insight', '')
         else:
-            conteudo = {'r1': "Dados ilegíveis."}
+            # Fallback para relatórios antigos (texto puro)
+            r1_txt = raw.get('r1', "Sem dados")
+            r2_txt = raw.get('r2', "Sem dados")
+            r3_txt = raw.get('r3', "Sem dados")
+            r4_txt = raw.get('r4', "Sem dados")
 
         pdf = TechnoBoltPDF()
         pdf.set_auto_page_break(auto=True, margin=15)
@@ -567,15 +632,15 @@ def baixar_pdf_completo(usuario: str):
         pdf.ln(10)
 
         secoes = [
-            ("1. AVALIACAO ANTROPOMETRICA", conteudo.get('r1')),
-            ("2. PROTOCOLO NUTRICIONAL", conteudo.get('r2')),
-            ("3. SUPLEMENTACAO AVANCADA", conteudo.get('r3')),
-            ("4. PLANILHA DE TREINO", conteudo.get('r4'))
+            ("1. AVALIACAO ANTROPOMETRICA", r1_txt),
+            ("2. PROTOCOLO NUTRICIONAL", r2_txt),
+            ("3. SUPLEMENTACAO AVANCADA", r3_txt),
+            ("4. PLANILHA DE TREINO", r4_txt)
         ]
 
         for titulo, texto in secoes:
             pdf.chapter_title(titulo)
-            pdf.chapter_body(str(texto or "Sem dados."))
+            pdf.chapter_body(str(texto))
 
         pdf_buffer = io.BytesIO()
         pdf_output = pdf.output(dest='S')
