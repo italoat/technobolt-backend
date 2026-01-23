@@ -21,11 +21,7 @@ pillow_heif.register_heif_opener()
 app = FastAPI(title="TechnoBolt Gym Hub API", version="72.0-Elite-Final")
 
 # --- MOTORES DE IA ---
-MOTORES_TECHNOBOLT = [
-    "models/gemini-2.0-flash",
-    "models/gemini-1.5-flash",
-    "models/gemini-1.5-pro"
-]
+MOTORES_TECHNOBOLT = ["models/gemini-3-flash-preview", "models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-flash-latest"]
 
 # --- CONEXÃO BANCO ---
 def get_database():
