@@ -18,7 +18,7 @@ from fpdf import FPDF
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="74.0-Elite-Full-Detail")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="75.0-Elite-User-Centric")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = ["models/gemini-3-flash-preview", "models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-flash-latest"]
@@ -314,26 +314,45 @@ async def executar_analise(
     altura: int = Form(...),
     objetivo: str = Form(...),
     genero: str = Form("Masculino"),
+    observacoes: str = Form(""), # Novo campo para observações
     foto: UploadFile = File(...)
 ):
+    # Atualiza dados básicos e as observações (info_add)
+    db.usuarios.update_one(
+        {"usuario": usuario}, 
+        {"$set": {
+            "nome": nome_completo, 
+            "peso": peso, 
+            "altura": altura, 
+            "genero": genero,
+            "info_add": observacoes # Persiste as observações novas
+        }}
+    )
+
     user_data = db.usuarios.find_one({"usuario": usuario})
     r_a = user_data.get('restricoes_alim', 'Nenhuma')
     r_m = user_data.get('medicamentos', 'Nenhum')
     r_f = user_data.get('restricoes_fis', 'Nenhuma')
-    info = user_data.get('info_add', '')
+    info = user_data.get('info_add', '') # Garante que pega a mais atualizada
 
-    db.usuarios.update_one({"usuario": usuario}, {"$set": {"nome": nome_completo, "peso": peso, "altura": altura, "genero": genero}})
-    
     content = await foto.read()
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [NOVO PROMPT REFINADO PARA TODAS AS SEÇÕES]
+    # [NOVO PROMPT REFINADO COM DIRETIVA DE SEGURANÇA]
     prompt_mestre = f"""
     ATLETA: {nome_completo} ({genero}), IMC {imc:.2f}. META: {objetivo}.
-    RESTRIÇÕES: {r_a}, {r_m}, {r_f}. OBS: {info}.
-
+    
+    === DIRETIVAS DE SEGURANÇA E PERSONALIZAÇÃO ===
+    1. RESTRIÇÕES ALIMENTARES: {r_a}
+    2. RESTRIÇÕES FÍSICAS: {r_f}
+    3. MEDICAMENTOS: {r_m}
+    4. OBSERVAÇÕES DO USUÁRIO (CRUCIAL): {info}
+    
     Aja como um conselho de especialistas da TechnoBolt.
+    ⚠️ Se o usuário mencionou lesão (ex: coluna, joelho), PROÍBA exercícios que agravem.
+    ⚠️ Se houver restrição alimentar (ex: lactose), NÃO sugira alimentos proibidos.
+    
     Analise a foto do corpo e os dados.
     
     ⚠️ IMPORTANTE: VOCÊ DEVE RETORNAR APENAS UM OBJETO JSON VÁLIDO.
@@ -374,11 +393,9 @@ async def executar_analise(
         {{ "dia": "Sábado", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
         {{ "dia": "Domingo", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }}
       ],
-      "dieta_insight": "Insight nutricional geral",
+      "dieta_insight": "Insight nutricional geral considerando as restrições.",
       "suplementacao": [
-        {{ "nome": "Creatina Monohidratada", "dose": "5g", "horario": "Qualquer horário (com carbo)", "motivo": "Aumento de força e hidratação celular." }},
-        {{ "nome": "Whey Protein", "dose": "30g", "horario": "Pós-treino", "motivo": "Recuperação muscular rápida." }},
-        {{ "nome": "Multivitamínico", "dose": "1 caps", "horario": "Manhã", "motivo": "Suporte a micronutrientes." }}
+        {{ "nome": "Nome", "dose": "Dose", "horario": "Horario", "motivo": "Motivo" }}
       ],
       "suplementacao_insight": "Insight ortomolecular",
       "treino": [
@@ -386,10 +403,9 @@ async def executar_analise(
           "dia": "Segunda",
           "foco": "Peito e Tríceps",
           "exercicios": [
-            {{ "nome": "Supino Reto", "series_reps": "4x10-12" }},
-            {{ "nome": "Crucifixo", "series_reps": "3x12" }}
+            {{ "nome": "Supino Reto", "series_reps": "4x10-12" }}
           ],
-          "treino_alternativo": "Flexões",
+          "treino_alternativo": "Substituição caso haja dor ou falta de equipamento",
           "justificativa": "Foco em hipertrofia."
         }},
         {{ "dia": "Terça", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
@@ -399,7 +415,7 @@ async def executar_analise(
         {{ "dia": "Sábado", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
         {{ "dia": "Domingo", "foco": "Descanso", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }}
       ],
-      "treino_insight": "Insight biomecânico."
+      "treino_insight": "Insight biomecânico considerando as lesões/dores citadas."
     }}
     """
     
@@ -431,6 +447,109 @@ async def executar_analise(
         db.usuarios.update_one({"usuario": usuario}, {"$push": {"historico_dossies": dossie}})
     
     return {"sucesso": True, "resultado": dossie}
+
+# --- NOVO ENDPOINT: REGENERAR APENAS UMA SEÇÃO ---
+@app.post("/analise/regenerar-secao")
+def regenerar_secao(dados: dict):
+    # dados esperados: {"usuario": "...", "secao": "dieta" | "treino" | "suplementacao" | "avaliacao"}
+    usuario = dados.get("usuario")
+    secao = dados.get("secao")
+    
+    if not usuario or secao not in ["dieta", "treino", "suplementacao", "avaliacao"]:
+        return {"sucesso": False, "mensagem": "Seção inválida ou usuário não informado."}
+
+    user_data = db.usuarios.find_one({"usuario": usuario})
+    if not user_data or not user_data.get('historico_dossies'):
+        return {"sucesso": False, "mensagem": "Nenhum histórico encontrado para basear a regeneração."}
+
+    # Pega o último dossiê para contexto
+    ultimo_dossie = user_data['historico_dossies'][-1]
+    
+    # Dados de contexto
+    r_a = user_data.get('restricoes_alim', 'Nenhuma')
+    r_f = user_data.get('restricoes_fis', 'Nenhuma')
+    obs = user_data.get('info_add', 'Nenhuma')
+    nome = user_data.get('nome', 'Atleta')
+    objetivo = "Otimização e Ajuste" # Contexto de melhoria
+
+    # Prompt Específico para Regeneração
+    prompt_regeneracao = f"""
+    ATENÇÃO: Você é um especialista da TechnoBolt.
+    TAREFA: Reescrever APENAS a seção de '{secao.upper()}' para o atleta {nome}.
+    
+    CONTEXTO ATUALIZADO:
+    - Restrições Físicas: {r_f}
+    - Restrições Alimentares: {r_a}
+    - Observações/Queixas do Usuário: {obs}
+    
+    O usuário solicitou um novo plano especificamente para {secao} pois o anterior pode não ter se adaptado bem ou ele quer variar.
+    SEJA RIGOROSO COM AS RESTRIÇÕES. Se ele tem dor nas costas, nada de agachamento livre ou terra pesado.
+    
+    RETORNE APENAS UM JSON VÁLIDO com a chave correspondente à seção. Exemplo de estrutura:
+    """
+
+    if secao == "dieta":
+        prompt_regeneracao += """
+        {
+            "dieta": [ lista de 7 dias com refeicoes e macros ],
+            "dieta_insight": "Novo insight nutricional"
+        }
+        """
+    elif secao == "treino":
+        prompt_regeneracao += """
+        {
+            "treino": [ lista de 7 dias com exercicios ],
+            "treino_insight": "Novo insight de treino"
+        }
+        """
+    elif secao == "suplementacao":
+        prompt_regeneracao += """
+        {
+            "suplementacao": [ lista de suplementos ],
+            "suplementacao_insight": "Novo insight de suplementos"
+        }
+        """
+    elif secao == "avaliacao":
+         prompt_regeneracao += """
+        {
+            "avaliacao": { segmentacao, dobras, analise_postural, simetria, insight }
+        }
+        """
+
+    # Roda a IA (sem imagem, baseada no contexto textual salvo)
+    resultado_texto = rodar_ia(prompt_regeneracao)
+    
+    if not resultado_texto:
+        return {"sucesso": False, "mensagem": "Erro na IA ao regenerar seção."}
+
+    novo_fragmento = limpar_e_parsear_json(resultado_texto)
+    
+    # Atualiza apenas a seção específica no último dossiê do banco
+    caminho_update = f"historico_dossies.-1.conteudo_bruto.json_full.{secao}"
+    caminho_insight = f"historico_dossies.-1.conteudo_bruto.json_full.{secao}_insight"
+    
+    updates = {}
+    
+    if secao in novo_fragmento:
+        updates[caminho_update] = novo_fragmento[secao]
+    
+    # Atualiza o insight se existir (avaliacao tem o insight dentro do objeto, outros fora)
+    if secao == "avaliacao":
+         # Avaliação já contém o insight dentro
+         pass
+    else:
+         key_insight = f"{secao}_insight"
+         if key_insight in novo_fragmento:
+             updates[caminho_insight] = novo_fragmento[key_insight]
+
+    if updates:
+        db.usuarios.update_one({"usuario": usuario}, {"$set": updates})
+        
+        # Retorna o dossiê completo atualizado
+        user_atualizado = db.usuarios.find_one({"usuario": usuario})
+        return {"sucesso": True, "resultado": user_atualizado['historico_dossies'][-1]}
+    
+    return {"sucesso": False, "mensagem": "Falha ao processar resposta da IA."}
 
 @app.get("/historico/{usuario}")
 def buscar_historico(usuario: str):
