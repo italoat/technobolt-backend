@@ -18,10 +18,16 @@ from fpdf import FPDF
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="75.0-Elite-User-Centric")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="77.0-Elite-Granular-Refresh")
 
 # --- MOTORES DE IA ---
-MOTORES_TECHNOBOLT = ["models/gemini-3-flash-preview", "models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-flash-latest"]
+# [AJUSTE] Lista de modelos atualizada conforme solicitado
+MOTORES_TECHNOBOLT = [
+    "models/gemini-3-flash-preview", 
+    "models/gemini-2.5-flash", 
+    "models/gemini-2.0-flash", 
+    "models/gemini-flash-latest"
+]
 
 # --- CONEXÃO BANCO ---
 def get_database():
@@ -52,15 +58,16 @@ def rodar_ia(prompt, imagem_bytes=None):
         for modelo in MOTORES_TECHNOBOLT:
             try:
                 model = genai.GenerativeModel(modelo)
-                # Configuração para forçar JSON (quando suportado pelo modelo) ou texto limpo
-                generation_config = {"response_mime_type": "application/json"} if "json" in prompt.lower() else None
+                # Configuração para forçar JSON e AUMENTAR O LIMITE DE TOKENS DE RESPOSTA
+                generation_config = {
+                    "response_mime_type": "application/json" if "json" in prompt.lower() else "text/plain",
+                    "max_output_tokens": 8192, 
+                    "temperature": 0.7
+                }
                 
                 inputs = [prompt, img_blob] if img_blob else [prompt]
                 
-                if generation_config:
-                    response = model.generate_content(inputs, generation_config=generation_config)
-                else:
-                    response = model.generate_content(inputs)
+                response = model.generate_content(inputs, generation_config=generation_config)
 
                 if response and response.text:
                     return response.text
@@ -314,7 +321,7 @@ async def executar_analise(
     altura: int = Form(...),
     objetivo: str = Form(...),
     genero: str = Form("Masculino"),
-    observacoes: str = Form(""), # Novo campo para observações
+    observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
     # Atualiza dados básicos e as observações (info_add)
@@ -325,7 +332,7 @@ async def executar_analise(
             "peso": peso, 
             "altura": altura, 
             "genero": genero,
-            "info_add": observacoes # Persiste as observações novas
+            "info_add": observacoes
         }}
     )
 
@@ -333,89 +340,108 @@ async def executar_analise(
     r_a = user_data.get('restricoes_alim', 'Nenhuma')
     r_m = user_data.get('medicamentos', 'Nenhum')
     r_f = user_data.get('restricoes_fis', 'Nenhuma')
-    info = user_data.get('info_add', '') # Garante que pega a mais atualizada
+    info = user_data.get('info_add', '') 
 
     content = await foto.read()
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [NOVO PROMPT REFINADO COM DIRETIVA DE SEGURANÇA]
+    # [PROMPT MESTRE]
     prompt_mestre = f"""
-    ATLETA: {nome_completo} ({genero}), IMC {imc:.2f}. META: {objetivo}.
+    VOCÊ É A IA DE ELITE DA TECHNOBOLT. SUA MISSÃO É CRIAR UM PROTOCOLO DE ALTA PERFORMANCE.
     
-    === DIRETIVAS DE SEGURANÇA E PERSONALIZAÇÃO ===
-    1. RESTRIÇÕES ALIMENTARES: {r_a}
-    2. RESTRIÇÕES FÍSICAS: {r_f}
-    3. MEDICAMENTOS: {r_m}
-    4. OBSERVAÇÕES DO USUÁRIO (CRUCIAL): {info}
+    DADOS DO ATLETA:
+    - Nome: {nome_completo} ({genero})
+    - IMC: {imc:.2f}
+    - Objetivo: {objetivo} (FOCO TOTAL EM RESULTADO MÁXIMO)
     
-    Aja como um conselho de especialistas da TechnoBolt.
-    ⚠️ Se o usuário mencionou lesão (ex: coluna, joelho), PROÍBA exercícios que agravem.
-    ⚠️ Se houver restrição alimentar (ex: lactose), NÃO sugira alimentos proibidos.
+    RESTRIÇÕES E OBSERVAÇÕES (OBRIGATÓRIO RESPEITAR):
+    - Alimentares: {r_a}
+    - Físicas: {r_f}
+    - Medicamentos: {r_m}
+    - Observações Extras: {info}
+
+    ===================================================================================
+    REGRAS CRÍTICAS DE GERAÇÃO (LEIA COM ATENÇÃO):
+    1. NÃO SEJA PREGUIÇOSO. Você DEVE gerar o plano COMPLETO para os 7 DIAS DA SEMANA (Segunda a Domingo).
+    2. DIETA: Gere cardápios DIFERENTES ou CICLOS para TODOS OS 7 DIAS. Nada de "Repetir dia anterior".
+    3. TREINO: O usuário pediu para MAXIMIZAR o resultado.
+       - Crie treinos de ALTO VOLUME.
+       - Mínimo de 8 a 12 EXERCÍCIOS por sessão de treino.
+       - Cubra TODOS OS GRUPOS MUSCULARES divididos durante a semana (ABC, ABCD, ou ABCDE).
+       - Se for dia de descanso, especifique cardio leve ou recuperação ativa.
+    4. RESPEITE LESÕES: Se houver lesão citada, adapte o treino (ex: lesão no joelho = sem impacto).
+    ===================================================================================
     
-    Analise a foto do corpo e os dados.
-    
-    ⚠️ IMPORTANTE: VOCÊ DEVE RETORNAR APENAS UM OBJETO JSON VÁLIDO.
-    NÃO USE MARKDOWN. A ESTRUTURA DEVE SER EXATAMENTE ESTA:
+    RETORNE APENAS JSON VÁLIDO (SEM MARKDOWN) NESTE FORMATO EXATO:
 
     {{
       "avaliacao": {{
         "segmentacao": {{
-          "tronco": "Análise detalhada do tronco",
-          "superior": "Análise detalhada de braços/ombros",
-          "inferior": "Análise detalhada de pernas"
+          "tronco": "Análise detalhada...",
+          "superior": "Análise detalhada...",
+          "inferior": "Análise detalhada..."
         }},
         "dobras": {{
-          "abdominal": "Estimativa visual detalhada",
-          "suprailiaca": "Estimativa visual detalhada",
-          "peitoral": "Estimativa visual detalhada"
+          "abdominal": "Estimativa...",
+          "suprailiaca": "Estimativa...",
+          "peitoral": "Estimativa..."
         }},
-        "analise_postural": "Observe desvios posturais, lordose, cifose ou escoliose aparentes.",
-        "simetria": "Observe diferenças entre lado esquerdo/direito.",
-        "insight": "Recomendação técnica principal."
+        "analise_postural": "Texto sobre postura...",
+        "simetria": "Texto sobre simetria...",
+        "insight": "Insight principal."
       }},
       "dieta": [
         {{
             "dia": "Segunda-feira",
-            "foco_nutricional": "Ex: Carb Cycling Alto ou Manutenção",
+            "foco_nutricional": "Ex: High Carb",
             "refeicoes": [
-                {{ "horario": "08:00", "nome": "Café da Manhã", "alimentos": "3 Ovos, 50g Aveia, Fruta" }},
-                {{ "horario": "12:00", "nome": "Almoço", "alimentos": "150g Frango, 200g Arroz, Salada" }},
-                {{ "horario": "16:00", "nome": "Lanche", "alimentos": "Whey Protein, 20g Castanhas" }},
-                {{ "horario": "20:00", "nome": "Jantar", "alimentos": "150g Peixe, Legumes, Azeite" }}
+                {{ "horario": "08:00", "nome": "Café", "alimentos": "..." }},
+                {{ "horario": "12:00", "nome": "Almoço", "alimentos": "..." }},
+                {{ "horario": "15:00", "nome": "Lanche", "alimentos": "..." }},
+                {{ "horario": "18:00", "nome": "Pré-treino", "alimentos": "..." }},
+                {{ "horario": "21:00", "nome": "Jantar", "alimentos": "..." }}
             ],
-            "macros_totais": "P: 180g | C: 250g | G: 70g | Kcal: 2400"
+            "macros_totais": "P: 200g | C: 300g..."
         }},
-        {{ "dia": "Terça-feira", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
-        {{ "dia": "Quarta-feira", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
-        {{ "dia": "Quinta-feira", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
-        {{ "dia": "Sexta-feira", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
-        {{ "dia": "Sábado", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
-        {{ "dia": "Domingo", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }}
+        {{ "dia": "Terça-feira", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
+        {{ "dia": "Quarta-feira", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
+        {{ "dia": "Quinta-feira", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
+        {{ "dia": "Sexta-feira", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
+        {{ "dia": "Sábado", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
+        {{ "dia": "Domingo", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }}
       ],
-      "dieta_insight": "Insight nutricional geral considerando as restrições.",
+      "dieta_insight": "Estratégia nutricional detalhada.",
       "suplementacao": [
-        {{ "nome": "Nome", "dose": "Dose", "horario": "Horario", "motivo": "Motivo" }}
+        {{ "nome": "Creatina", "dose": "5g", "horario": "Manhã", "motivo": "Força" }},
+        {{ "nome": "Whey", "dose": "30g", "horario": "Pós-treino", "motivo": "Recuperação" }}
       ],
-      "suplementacao_insight": "Insight ortomolecular",
+      "suplementacao_insight": "Estratégia de suplementação.",
       "treino": [
         {{
-          "dia": "Segunda",
-          "foco": "Peito e Tríceps",
+          "dia": "Segunda-feira",
+          "foco": "Costas e Bíceps (Volume Alto)",
           "exercicios": [
-            {{ "nome": "Supino Reto", "series_reps": "4x10-12" }}
+            {{ "nome": "Puxada Alta", "series_reps": "4x12" }},
+            {{ "nome": "Remada Curvada", "series_reps": "4x10" }},
+            {{ "nome": "Remada Baixa", "series_reps": "3x12" }},
+            {{ "nome": "Pulldown", "series_reps": "3x15" }},
+            {{ "nome": "Crucifixo Inverso", "series_reps": "4x12" }},
+            {{ "nome": "Rosca Direta", "series_reps": "4x10" }},
+            {{ "nome": "Rosca Martelo", "series_reps": "3x12" }},
+            {{ "nome": "Rosca Scott", "series_reps": "3x15" }}
           ],
-          "treino_alternativo": "Substituição caso haja dor ou falta de equipamento",
-          "justificativa": "Foco em hipertrofia."
+          "treino_alternativo": "Opção com halteres",
+          "justificativa": "Foco em densidade dorsal."
         }},
-        {{ "dia": "Terça", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
-        {{ "dia": "Quarta", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
-        {{ "dia": "Quinta", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
-        {{ "dia": "Sexta", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
-        {{ "dia": "Sábado", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
-        {{ "dia": "Domingo", "foco": "Descanso", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }}
+        {{ "dia": "Terça-feira", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
+        {{ "dia": "Quarta-feira", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
+        {{ "dia": "Quinta-feira", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
+        {{ "dia": "Sexta-feira", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
+        {{ "dia": "Sábado", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
+        {{ "dia": "Domingo", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }}
       ],
-      "treino_insight": "Insight biomecânico considerando as lesões/dores citadas."
+      "treino_insight": "Explicação da periodização."
     }}
     """
     
@@ -448,18 +474,34 @@ async def executar_analise(
     
     return {"sucesso": True, "resultado": dossie}
 
-# --- NOVO ENDPOINT: REGENERAR APENAS UMA SEÇÃO ---
+# --- ENDPOINT ATUALIZADO: REGENERAR SEÇÃO OU DIA ESPECÍFICO COM CUSTO ---
 @app.post("/analise/regenerar-secao")
 def regenerar_secao(dados: dict):
-    # dados esperados: {"usuario": "...", "secao": "dieta" | "treino" | "suplementacao" | "avaliacao"}
+    # dados esperados: 
+    # {
+    #   "usuario": "...", 
+    #   "secao": "dieta" | "treino" | "suplementacao" | "avaliacao",
+    #   "dia": "Quinta-feira" (Opcional - Se enviado, regenera apenas este dia)
+    # }
     usuario = dados.get("usuario")
     secao = dados.get("secao")
+    dia_alvo = dados.get("dia") # Parâmetro opcional para granularidade
     
     if not usuario or secao not in ["dieta", "treino", "suplementacao", "avaliacao"]:
         return {"sucesso": False, "mensagem": "Seção inválida ou usuário não informado."}
 
     user_data = db.usuarios.find_one({"usuario": usuario})
-    if not user_data or not user_data.get('historico_dossies'):
+    if not user_data:
+        return {"sucesso": False, "mensagem": "Usuário não encontrado."}
+    
+    # [AJUSTE] Verificação de Créditos
+    creditos = user_data.get('avaliacoes_restantes', 0)
+    is_admin = user_data.get('is_admin', False)
+
+    if creditos <= 0 and not is_admin:
+        return {"sucesso": False, "mensagem": "Saldo de créditos insuficiente para regenerar."}
+
+    if not user_data.get('historico_dossies'):
         return {"sucesso": False, "mensagem": "Nenhum histórico encontrado para basear a regeneração."}
 
     # Pega o último dossiê para contexto
@@ -470,86 +512,110 @@ def regenerar_secao(dados: dict):
     r_f = user_data.get('restricoes_fis', 'Nenhuma')
     obs = user_data.get('info_add', 'Nenhuma')
     nome = user_data.get('nome', 'Atleta')
-    objetivo = "Otimização e Ajuste" # Contexto de melhoria
-
-    # Prompt Específico para Regeneração
-    prompt_regeneracao = f"""
-    ATENÇÃO: Você é um especialista da TechnoBolt.
-    TAREFA: Reescrever APENAS a seção de '{secao.upper()}' para o atleta {nome}.
     
-    CONTEXTO ATUALIZADO:
-    - Restrições Físicas: {r_f}
-    - Restrições Alimentares: {r_a}
-    - Observações/Queixas do Usuário: {obs}
-    
-    O usuário solicitou um novo plano especificamente para {secao} pois o anterior pode não ter se adaptado bem ou ele quer variar.
-    SEJA RIGOROSO COM AS RESTRIÇÕES. Se ele tem dor nas costas, nada de agachamento livre ou terra pesado.
-    
-    RETORNE APENAS UM JSON VÁLIDO com a chave correspondente à seção. Exemplo de estrutura:
-    """
-
-    if secao == "dieta":
-        prompt_regeneracao += """
-        {
-            "dieta": [ lista de 7 dias com refeicoes e macros ],
-            "dieta_insight": "Novo insight nutricional"
-        }
+    # --- LÓGICA DE PROMPT (DIA ESPECÍFICO VS SEÇÃO COMPLETA) ---
+    if dia_alvo and secao in ["dieta", "treino"]:
+        # MODO: REFRESH DE DIA ÚNICO
+        prompt_regeneracao = f"""
+        ATENÇÃO: Você é um especialista da TechnoBolt.
+        TAREFA: Reescrever APENAS o dia '{dia_alvo}' da seção '{secao.upper()}' para o atleta {nome}.
+        
+        O usuário quer mudar especificamente a rotina deste dia. Mantenha a intensidade alta.
+        
+        CONTEXTO:
+        - Restrições: {r_f} (Físicas), {r_a} (Alimentares)
+        - Obs: {obs}
+        
+        RETORNE APENAS UM JSON COM O OBJETO DESTE DIA.
+        Exemplo para Dieta: {{ "dia": "{dia_alvo}", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }}
+        Exemplo para Treino: {{ "dia": "{dia_alvo}", "foco": "...", "exercicios": [...], "treino_alternativo": "...", "justificativa": "..." }}
         """
-    elif secao == "treino":
-        prompt_regeneracao += """
-        {
-            "treino": [ lista de 7 dias com exercicios ],
-            "treino_insight": "Novo insight de treino"
-        }
-        """
-    elif secao == "suplementacao":
-        prompt_regeneracao += """
-        {
-            "suplementacao": [ lista de suplementos ],
-            "suplementacao_insight": "Novo insight de suplementos"
-        }
-        """
-    elif secao == "avaliacao":
-         prompt_regeneracao += """
-        {
-            "avaliacao": { segmentacao, dobras, analise_postural, simetria, insight }
-        }
+    else:
+        # MODO: REFRESH DE SEÇÃO COMPLETA (Mantido lógica anterior)
+        prompt_regeneracao = f"""
+        ATENÇÃO: Você é um especialista da TechnoBolt.
+        TAREFA: Reescrever COMPLETAMENTE a seção de '{secao.upper()}' para o atleta {nome}.
+        O usuário pediu um "REFRESH" nesta seção completa.
+        
+        CONTEXTO ATUALIZADO:
+        - Restrições Físicas: {r_f}
+        - Restrições Alimentares: {r_a}
+        - Observações: {obs}
+        
+        REGRAS:
+        1. GERE PARA OS 7 DIAS (Segunda a Domingo) se for Treino/Dieta.
+        2. Mantenha volume ALTO (8-12 exercícios) para treino.
+        
+        RETORNE APENAS UM JSON VÁLIDO com a chave correspondente à seção. Exemplo: {{ "{secao}": [ ... ] }}
         """
 
-    # Roda a IA (sem imagem, baseada no contexto textual salvo)
+    # Roda a IA
     resultado_texto = rodar_ia(prompt_regeneracao)
     
     if not resultado_texto:
-        return {"sucesso": False, "mensagem": "Erro na IA ao regenerar seção."}
+        return {"sucesso": False, "mensagem": "Erro na IA ao regenerar."}
 
-    novo_fragmento = limpar_e_parsear_json(resultado_texto)
+    novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
-    # Atualiza apenas a seção específica no último dossiê do banco
-    caminho_update = f"historico_dossies.-1.conteudo_bruto.json_full.{secao}"
-    caminho_insight = f"historico_dossies.-1.conteudo_bruto.json_full.{secao}_insight"
-    
+    # --- LÓGICA DE ATUALIZAÇÃO NO BANCO ---
     updates = {}
     
-    if secao in novo_fragmento:
-        updates[caminho_update] = novo_fragmento[secao]
-    
-    # Atualiza o insight se existir (avaliacao tem o insight dentro do objeto, outros fora)
-    if secao == "avaliacao":
-         # Avaliação já contém o insight dentro
-         pass
-    else:
-         key_insight = f"{secao}_insight"
-         if key_insight in novo_fragmento:
-             updates[caminho_insight] = novo_fragmento[key_insight]
-
-    if updates:
-        db.usuarios.update_one({"usuario": usuario}, {"$set": updates})
+    if dia_alvo and secao in ["dieta", "treino"]:
+        # Atualização de Dia Específico (Mais complexo: precisa achar o índice no array)
+        lista_atual = ultimo_dossie.get('conteudo_bruto', {}).get('json_full', {}).get(secao, [])
         
-        # Retorna o dossiê completo atualizado
+        # Encontra o índice do dia alvo (busca case-insensitive parcial)
+        idx_alvo = -1
+        for i, item in enumerate(lista_atual):
+            if dia_alvo.lower() in item.get('dia', '').lower():
+                idx_alvo = i
+                break
+        
+        # O objeto retornado pela IA para um dia único geralmente não vem encapsulado na chave da seção
+        # Mas as vezes a IA coloca. Vamos normalizar.
+        objeto_dia = novo_dado_ia.get(secao, novo_dado_ia) # Tenta pegar dentro da chave, se não, é o próprio dict
+        if isinstance(objeto_dia, list): objeto_dia = objeto_dia[0] # Se veio lista de 1 item
+
+        if idx_alvo != -1:
+            # Substitui no índice específico
+            updates[f"historico_dossies.-1.conteudo_bruto.json_full.{secao}.{idx_alvo}"] = objeto_dia
+        else:
+            # Se não achou o dia (estranho), adiciona no final ou retorna erro. Vamos tentar adicionar.
+            # (Na prática, é melhor retornar erro se o dia não existe no array original, mas vamos ser permissivos)
+            # updates -> push (complexo com $set). Vamos simplificar: se não achou, ignora.
+            pass
+            
+    else:
+        # Atualização de Seção Completa
+        caminho_update = f"historico_dossies.-1.conteudo_bruto.json_full.{secao}"
+        caminho_insight = f"historico_dossies.-1.conteudo_bruto.json_full.{secao}_insight"
+        
+        if secao in novo_dado_ia:
+            updates[caminho_update] = novo_dado_ia[secao]
+            
+        if secao != "avaliacao":
+             key_insight = f"{secao}_insight"
+             if key_insight in novo_dado_ia:
+                 updates[caminho_insight] = novo_dado_ia[key_insight]
+
+    # Aplica as atualizações e cobra o crédito
+    if updates:
+        # Prepara o comando de update ($set para dados, $inc para créditos)
+        mongo_cmd = {"$set": updates}
+        if not is_admin:
+            mongo_cmd["$inc"] = {"avaliacoes_restantes": -1}
+            
+        db.usuarios.update_one({"usuario": usuario}, mongo_cmd)
+        
+        # Retorna o dossiê completo atualizado e o novo saldo
         user_atualizado = db.usuarios.find_one({"usuario": usuario})
-        return {"sucesso": True, "resultado": user_atualizado['historico_dossies'][-1]}
+        return {
+            "sucesso": True, 
+            "resultado": user_atualizado['historico_dossies'][-1],
+            "novo_saldo": user_atualizado.get('avaliacoes_restantes', 0)
+        }
     
-    return {"sucesso": False, "mensagem": "Falha ao processar resposta da IA."}
+    return {"sucesso": False, "mensagem": "Falha ao processar estrutura da resposta da IA."}
 
 @app.get("/historico/{usuario}")
 def buscar_historico(usuario: str):
