@@ -18,7 +18,7 @@ from fpdf import FPDF
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="71.0-Elite-JSON")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="72.0-Elite-Final")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
@@ -82,7 +82,7 @@ def limpar_e_parsear_json(texto_ia):
         print(f"Erro ao parsear JSON da IA: {e}")
         # Retorna estrutura vazia para não quebrar o app
         return {
-            "avaliacao": {"insight": "Erro na IA"},
+            "avaliacao": {"insight": "Erro na leitura da IA"},
             "dieta": [],
             "suplementacao": [],
             "treino": []
@@ -99,7 +99,7 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     except Exception:
         return file_bytes
 
-# --- PDF GENERATOR (ATUALIZADO PARA JSON) ---
+# --- PDF GENERATOR PREMIUM (DARK MODE) ---
 
 def sanitizar_texto(texto):
     """Remove emojis e caracteres incompatíveis com Latin-1 do PDF"""
@@ -108,67 +108,115 @@ def sanitizar_texto(texto):
     texto = texto.replace("🚀", ">>").replace("✅", "[OK]").replace("⚠️", "[!]")
     texto = texto.replace("💊", "").replace("🥗", "").replace("🏋️", "").replace("📊", "")
     texto = texto.replace("**", "").replace("###", "").replace("##", "")
+    # Substituições comuns de aspas e travessões
+    texto = texto.replace("–", "-").replace("“", '"').replace("”", '"')
     return texto.encode('latin-1', 'replace').decode('latin-1')
 
-def converter_json_para_texto(dados, tipo):
-    """Converte a estrutura JSON em texto corrido para o PDF"""
-    texto = ""
-    if tipo == "dieta":
-        for item in dados:
-            texto += f"\n[{item.get('dia', 'Dia')}]\n"
-            texto += f"Refeicoes: {item.get('refeicoes', '')}\n"
-            texto += f"Macros: {item.get('macros', '')}\n"
-            texto += "-" * 40 + "\n"
-    elif tipo == "treino":
-        for item in dados:
-            texto += f"\n[{item.get('dia', 'Dia')}] - {item.get('titulo', '')}\n"
-            texto += f"Detalhes: {item.get('detalhe', '')}\n"
-            texto += "-" * 40 + "\n"
-    elif tipo == "suplementos":
-        for item in dados:
-            texto += f"Item: {item.get('titulo', '')}\n"
-            texto += f"Uso: {item.get('detalhe', '')}\n\n"
-    elif tipo == "avaliacao":
-         texto += f"Tronco: {dados.get('segmentacao', {}).get('tronco', '')}\n"
-         texto += f"Membros Sup: {dados.get('segmentacao', {}).get('superior', '')}\n"
-         texto += f"Membros Inf: {dados.get('segmentacao', {}).get('inferior', '')}\n"
-    
-    return texto
+class ModernPDF(FPDF):
+    def __init__(self):
+        super().__init__()
+        self.set_auto_page_break(auto=True, margin=15)
+        # Cores da Marca (Dark Mode)
+        self.col_fundo = (20, 20, 25)      # Preto Suave (Background)
+        self.col_card = (35, 35, 40)       # Cinza Card
+        self.col_azul = (59, 130, 246)     # Azul TechnoBolt
+        self.col_texto = (230, 230, 230)   # Branco Gelo
+        self.col_destaque = (0, 255, 200)  # Ciano Neon
 
-class TechnoBoltPDF(FPDF):
     def header(self):
-        self.set_fill_color(13, 13, 13)
-        self.rect(0, 0, 210, 40, 'F')
+        # Fundo total da página
+        self.set_fill_color(*self.col_fundo)
+        self.rect(0, 0, 210, 297, 'F')
+        
+        # Barra superior
+        self.set_fill_color(10, 10, 15)
+        self.rect(0, 0, 210, 35, 'F')
+        
+        # Logo (Texto Estilizado)
         self.set_xy(10, 10)
-        self.set_font("Helvetica", "B", 20)
-        self.set_text_color(59, 130, 246)
-        self.cell(0, 10, "TECHNOBOLT GYM HUB", ln=True, align='L')
-        self.set_font("Helvetica", "I", 9)
-        self.set_text_color(200, 200, 200)
-        self.cell(0, 5, "RELATORIO DE ALTA PERFORMANCE | PHP PROTOCOL", ln=True, align='L')
+        self.set_font("Helvetica", "B", 24)
+        self.set_text_color(*self.col_azul)
+        self.cell(60, 10, "TECHNOBOLT", 0, 0)
+        self.set_text_color(255, 255, 255)
+        self.cell(40, 10, "GYM HUB", 0, 1)
+        
+        # Subtitulo
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(150, 150, 150)
+        self.set_xy(10, 20)
+        self.cell(0, 5, "RELATORIO DE ALTA PERFORMANCE | PHP PROTOCOL", 0, 1)
+        
+        # Linha decorativa
+        self.set_draw_color(*self.col_destaque)
+        self.set_line_width(0.5)
+        self.line(10, 35, 200, 35)
         self.ln(20)
 
     def footer(self):
         self.set_y(-15)
         self.set_font("Helvetica", "I", 8)
-        self.set_text_color(128, 128, 128)
-        self.cell(0, 10, f'Pagina {self.page_no()}', 0, 0, 'C')
+        self.set_text_color(100, 100, 100)
+        self.cell(0, 10, f'TechnoBolt Intelligence AI - Pagina {self.page_no()}', 0, 0, 'C')
 
-    def chapter_title(self, label):
-        self.set_font("Helvetica", "B", 14)
-        self.set_text_color(59, 130, 246)
-        self.cell(0, 10, sanitizar_texto(label), 0, 1, 'L')
-        self.ln(2)
-        self.set_draw_color(200, 200, 200)
-        self.line(10, self.get_y(), 200, self.get_y())
+    def draw_section_title(self, title, icon=">"):
+        self.ln(5)
+        self.set_font("Helvetica", "B", 16)
+        self.set_text_color(*self.col_destaque)
+        self.cell(10, 10, icon, 0, 0)
+        self.set_text_color(*self.col_azul)
+        self.cell(0, 10, sanitizar_texto(title.upper()), 0, 1)
+        
+        # Linha sutil abaixo do título
+        self.set_draw_color(50, 50, 60)
+        self.line(10, self.get_y(), 100, self.get_y())
         self.ln(5)
 
-    def chapter_body(self, body):
-        self.set_font("Helvetica", "", 11)
-        self.set_text_color(50, 50, 50)
-        texto_limpo = sanitizar_texto(body)
-        self.multi_cell(0, 7, texto_limpo)
-        self.ln()
+    def draw_card_text(self, label, content):
+        """Desenha um bloco de texto com fundo diferenciado"""
+        self.set_fill_color(*self.col_card)
+        self.set_text_color(*self.col_texto)
+        self.set_font("Helvetica", "", 10)
+        
+        # Título do bloco
+        self.set_font("Helvetica", "B", 11)
+        self.set_text_color(*self.col_azul)
+        self.multi_cell(0, 6, sanitizar_texto(label), fill=True)
+        
+        # Conteúdo
+        self.set_font("Helvetica", "", 10)
+        self.set_text_color(*self.col_texto)
+        texto = sanitizar_texto(str(content))
+        self.multi_cell(0, 6, texto, fill=True)
+        self.ln(2)
+
+    def draw_table_row(self, col1, col2, col3=None):
+        """Linha de tabela personalizada"""
+        self.set_fill_color(*self.col_card)
+        self.set_text_color(*self.col_texto)
+        self.set_font("Helvetica", "", 9)
+        self.set_draw_color(*self.col_fundo) # Borda da cor do fundo para "separar"
+        self.set_line_width(0.3)
+        
+        h = 8 # Altura base
+        
+        # Coluna 1 (Dia/Item) - Destaque
+        self.set_font("Helvetica", "B", 9)
+        self.set_text_color(*self.col_destaque)
+        self.cell(40, h, sanitizar_texto(col1), 1, 0, 'L', True)
+        
+        # Coluna 2 (Conteúdo)
+        self.set_font("Helvetica", "", 9)
+        self.set_text_color(*self.col_texto)
+        
+        if col3:
+            # Layout de 3 colunas (Dia | Refeição | Macros)
+            self.cell(100, h, sanitizar_texto(col2), 1, 0, 'L', True)
+            self.set_font("Helvetica", "I", 8)
+            self.set_text_color(150, 150, 150)
+            self.cell(50, h, sanitizar_texto(col3), 1, 1, 'L', True)
+        else:
+            # Layout de 2 colunas (Dia | Treino)
+            self.cell(150, h, sanitizar_texto(col2), 1, 1, 'L', True)
 
 # --- FUNÇÕES AUXILIARES DE NEGÓCIO ---
 
@@ -261,7 +309,7 @@ def atualizar_perfil(dados: dict):
     )
     return {"sucesso": True}
 
-# --- ENDPOINTS: ANÁLISE (REFATORADO PARA JSON) ---
+# --- ENDPOINTS: ANÁLISE (ESTRUTURADA PARA JSON) ---
 
 @app.post("/analise/executar")
 async def executar_analise(
@@ -351,10 +399,9 @@ async def executar_analise(
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "peso_reg": peso,
         "conteudo_bruto": {
-            # Mapeamos para as chaves que o Flutter espera (r1, r2...), mas agora enviando JSON ou Texto formatado
-            # Para o Flutter novo, vamos enviar o JSON completo na chave 'json_full'
+            # JSON puro para o novo Flutter
             "json_full": conteudo_json,
-            # Mantemos compatibilidade parcial caso precise
+            # Fallback para versões antigas
             "r1": conteudo_json.get('avaliacao', {}).get('insight', ''),
             "r2": conteudo_json.get('dieta_insight', ''),
             "r3": conteudo_json.get('suplementacao_insight', ''),
@@ -373,13 +420,7 @@ async def executar_analise(
 def buscar_historico(usuario: str):
     user = db.usuarios.find_one({"usuario": usuario})
     if not user: return {"sucesso": True, "historico": []}
-    
-    # Processamento para garantir que o front receba dados compatíveis
-    historico = user.get('historico_dossies', [])
-    
-    # Adaptação retroativa: Se for JSON novo, formata para o front antigo se necessário
-    # (Mas como você atualizou o front, ele vai ler o json_full se existir)
-    return {"sucesso": True, "historico": historico}
+    return {"sucesso": True, "historico": user.get('historico_dossies', [])}
 
 # --- ENDPOINTS: SOCIAL E DESAFIOS ---
 
@@ -391,7 +432,6 @@ def get_feed():
         p['likes'] = p.get('likes', [])
         p['comentarios'] = p.get('comentarios', [])
         p['medalha'] = calcular_medalha(p.get('autor'))
-        
     return {"sucesso": True, "feed": posts}
 
 @app.post("/social/postar")
@@ -561,7 +601,7 @@ async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...),
 
     return {"sucesso": True, "aprovado": aprovado, "pontos": pontos, "motivo": motivo}
 
-# --- ENDPOINTS: ADMIN & PDF ---
+# --- ENDPOINTS: ADMIN ---
 
 @app.get("/setup/criar-admin")
 def criar_admin_inicial():
@@ -596,6 +636,8 @@ def excluir_usuario(dados: dict):
     db.usuarios.delete_one({"usuario": dados['target_user']})
     return {"sucesso": True}
 
+# --- ENDPOINT: BAIXAR PDF (VERSÃO FINAL COM DARK MODE E JSON) ---
+
 @app.get("/analise/baixar-pdf/{usuario}")
 def baixar_pdf_completo(usuario: str):
     try:
@@ -605,43 +647,90 @@ def baixar_pdf_completo(usuario: str):
 
         dossie = user['historico_dossies'][-1]
         raw = dossie.get('conteudo_bruto', {})
+        json_data = raw.get('json_full', {}) if isinstance(raw.get('json_full'), dict) else {}
 
-        # Verifica se temos o novo formato JSON ou o antigo Texto
-        if 'json_full' in raw and isinstance(raw['json_full'], dict):
-            json_data = raw['json_full']
-            r1_txt = converter_json_para_texto(json_data.get('avaliacao'), "avaliacao") + "\n" + json_data.get('avaliacao', {}).get('insight', '')
-            r2_txt = converter_json_para_texto(json_data.get('dieta'), "dieta") + "\n" + json_data.get('dieta_insight', '')
-            r3_txt = converter_json_para_texto(json_data.get('suplementacao'), "suplementos") + "\n" + json_data.get('suplementacao_insight', '')
-            r4_txt = converter_json_para_texto(json_data.get('treino'), "treino") + "\n" + json_data.get('treino_insight', '')
-        else:
-            # Fallback para relatórios antigos (texto puro)
-            r1_txt = raw.get('r1', "Sem dados")
-            r2_txt = raw.get('r2', "Sem dados")
-            r3_txt = raw.get('r3', "Sem dados")
-            r4_txt = raw.get('r4', "Sem dados")
-
-        pdf = TechnoBoltPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf = ModernPDF()
         pdf.add_page()
-        
+
+        # --- CAPA DO RELATÓRIO ---
         pdf.set_font("Helvetica", "B", 12)
-        pdf.set_text_color(0, 0, 0)
+        pdf.set_text_color(255, 255, 255)
         pdf.cell(0, 10, sanitizar_texto(f"ATLETA: {user.get('nome', 'N/A').upper()}"), ln=True)
         pdf.set_font("Helvetica", "", 10)
-        pdf.cell(0, 10, f"DATA DA ANALISE: {dossie.get('data', 'N/A')}", ln=True)
+        pdf.set_text_color(180, 180, 180)
+        pdf.cell(0, 5, f"DATA DA ANALISE: {dossie.get('data', 'N/A')}", ln=True)
+        pdf.cell(0, 5, f"OBJETIVO: {sanitizar_texto(json_data.get('avaliacao', {}).get('insight', 'Alta Performance')[:50])}...", ln=True)
         pdf.ln(10)
 
-        secoes = [
-            ("1. AVALIACAO ANTROPOMETRICA", r1_txt),
-            ("2. PROTOCOLO NUTRICIONAL", r2_txt),
-            ("3. SUPLEMENTACAO AVANCADA", r3_txt),
-            ("4. PLANILHA DE TREINO", r4_txt)
-        ]
+        # --- 1. AVALIAÇÃO ---
+        pdf.draw_section_title("1. ANALISE CORPORAL", icon="O")
+        av = json_data.get('avaliacao', {})
+        seg = av.get('segmentacao', {})
+        dob = av.get('dobras', {})
+        
+        pdf.draw_card_text("Segmentacao Corporal:", 
+                           f"- Tronco: {seg.get('tronco','')}\n- Sup: {seg.get('superior','')}\n- Inf: {seg.get('inferior','')}")
+        pdf.ln(2)
+        pdf.draw_card_text("Estimativa de Dobras:", 
+                           f"- Abdominal: {dob.get('abdominal','')}\n- Supra: {dob.get('suprailiaca','')}")
+        
+        pdf.ln(5)
+        # Insight em destaque
+        pdf.set_text_color(0, 255, 200)
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.multi_cell(0, 6, sanitizar_texto(f">> INSIGHT: {av.get('insight', '')}"))
 
-        for titulo, texto in secoes:
-            pdf.chapter_title(titulo)
-            pdf.chapter_body(str(texto))
+        # --- 2. DIETA (TABELA) ---
+        pdf.add_page()
+        pdf.draw_section_title("2. PROTOCOLO NUTRICIONAL", icon="U")
+        
+        # Cabeçalho da Tabela
+        pdf.set_fill_color(50, 50, 60)
+        pdf.set_text_color(255, 255, 255)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(40, 8, "DIA DA SEMANA", 0, 0, 'L', True)
+        pdf.cell(100, 8, "REFEICOES SUGERIDAS", 0, 0, 'L', True)
+        pdf.cell(50, 8, "MACROS ALVO", 0, 1, 'L', True)
 
+        dieta = json_data.get('dieta', [])
+        if isinstance(dieta, list):
+            for item in dieta:
+                # Truncar texto longo para caber na tabela simples
+                ref = item.get('refeicoes', '')[:55] + "..." if len(item.get('refeicoes', '')) > 55 else item.get('refeicoes', '')
+                pdf.draw_table_row(item.get('dia', ''), ref, item.get('macros', ''))
+        
+        pdf.ln(5)
+        pdf.draw_card_text("Estrategia Nutricional:", json_data.get('dieta_insight', ''))
+
+        # --- 3. TREINO (TABELA) ---
+        pdf.add_page()
+        pdf.draw_section_title("3. PLANILHA DE TREINO", icon="X")
+        
+        # Cabeçalho
+        pdf.set_fill_color(50, 50, 60)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(40, 8, "DIA / GRUPO", 0, 0, 'L', True)
+        pdf.cell(150, 8, "RESUMO DO TREINO", 0, 1, 'L', True)
+
+        treino = json_data.get('treino', [])
+        if isinstance(treino, list):
+            for item in treino:
+                titulo_dia = f"{item.get('dia','')} - {item.get('titulo','')}"[:25]
+                detalhe = item.get('detalhe', '')[:80] + "..." if len(item.get('detalhe', '')) > 80 else item.get('detalhe', '')
+                pdf.draw_table_row(titulo_dia, detalhe)
+
+        pdf.ln(5)
+        pdf.draw_card_text("Analise Biomecanica:", json_data.get('treino_insight', ''))
+
+        # --- 4. SUPLEMENTAÇÃO ---
+        pdf.ln(10)
+        pdf.draw_section_title("4. SUPLEMENTACAO", icon="+")
+        suple = json_data.get('suplementacao', [])
+        if isinstance(suple, list):
+            for item in suple:
+                pdf.draw_table_row(item.get('titulo', ''), item.get('detalhe', ''))
+
+        # Output
         pdf_buffer = io.BytesIO()
         pdf_output = pdf.output(dest='S')
         
@@ -652,7 +741,7 @@ def baixar_pdf_completo(usuario: str):
             
         pdf_buffer.seek(0)
         
-        headers = {'Content-Disposition': f'attachment; filename="TechnoBolt_Laudo.pdf"'}
+        headers = {'Content-Disposition': f'attachment; filename="TechnoBolt_Protocolo.pdf"'}
         return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
 
     except Exception as e:
