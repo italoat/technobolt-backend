@@ -18,7 +18,7 @@ from fpdf import FPDF
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="72.0-Elite-Final")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="74.0-Elite-Full-Detail")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = ["models/gemini-3-flash-preview", "models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-flash-latest"]
@@ -118,6 +118,7 @@ class ModernPDF(FPDF):
         self.col_azul = (59, 130, 246)     # Azul TechnoBolt
         self.col_texto = (230, 230, 230)   # Branco Gelo
         self.col_destaque = (0, 255, 200)  # Ciano Neon
+        self.col_verde = (16, 185, 129)    # Verde Sucesso
 
     def header(self):
         # Fundo total da página
@@ -190,28 +191,26 @@ class ModernPDF(FPDF):
         self.set_fill_color(*self.col_card)
         self.set_text_color(*self.col_texto)
         self.set_font("Helvetica", "", 9)
-        self.set_draw_color(*self.col_fundo) # Borda da cor do fundo para "separar"
+        self.set_draw_color(*self.col_fundo) 
         self.set_line_width(0.3)
         
-        h = 8 # Altura base
+        h = 8 
         
-        # Coluna 1 (Dia/Item) - Destaque
+        # Coluna 1
         self.set_font("Helvetica", "B", 9)
         self.set_text_color(*self.col_destaque)
         self.cell(40, h, sanitizar_texto(col1), 1, 0, 'L', True)
         
-        # Coluna 2 (Conteúdo)
+        # Coluna 2
         self.set_font("Helvetica", "", 9)
         self.set_text_color(*self.col_texto)
         
         if col3:
-            # Layout de 3 colunas (Dia | Refeição | Macros)
             self.cell(100, h, sanitizar_texto(col2), 1, 0, 'L', True)
             self.set_font("Helvetica", "I", 8)
             self.set_text_color(150, 150, 150)
             self.cell(50, h, sanitizar_texto(col3), 1, 1, 'L', True)
         else:
-            # Layout de 2 colunas (Dia | Treino)
             self.cell(150, h, sanitizar_texto(col2), 1, 1, 'L', True)
 
 # --- FUNÇÕES AUXILIARES DE NEGÓCIO ---
@@ -329,7 +328,7 @@ async def executar_analise(
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [NOVO PROMPT ESTRUTURADO PARA JSON]
+    # [NOVO PROMPT REFINADO PARA TODAS AS SEÇÕES]
     prompt_mestre = f"""
     ATLETA: {nome_completo} ({genero}), IMC {imc:.2f}. META: {objetivo}.
     RESTRIÇÕES: {r_a}, {r_m}, {r_f}. OBS: {info}.
@@ -343,43 +342,64 @@ async def executar_analise(
     {{
       "avaliacao": {{
         "segmentacao": {{
-          "tronco": "Texto curto sobre tronco/cabeça",
-          "superior": "Texto curto sobre braços/ombros",
-          "inferior": "Texto curto sobre pernas"
+          "tronco": "Análise detalhada do tronco",
+          "superior": "Análise detalhada de braços/ombros",
+          "inferior": "Análise detalhada de pernas"
         }},
         "dobras": {{
-          "abdominal": "Texto estimativa",
-          "suprailiaca": "Texto estimativa",
-          "peitoral": "Texto estimativa"
+          "abdominal": "Estimativa visual detalhada",
+          "suprailiaca": "Estimativa visual detalhada",
+          "peitoral": "Estimativa visual detalhada"
         }},
-        "insight": "3 recomendações técnicas de avaliação"
+        "analise_postural": "Observe desvios posturais, lordose, cifose ou escoliose aparentes.",
+        "simetria": "Observe diferenças entre lado esquerdo/direito.",
+        "insight": "Recomendação técnica principal."
       }},
       "dieta": [
-        {{ "dia": "Segunda", "refeicoes": "Resumo das 3 opções", "macros": "Resumo macros" }},
-        {{ "dia": "Terça", "refeicoes": "...", "macros": "..." }},
-        {{ "dia": "Quarta", "refeicoes": "...", "macros": "..." }},
-        {{ "dia": "Quinta", "refeicoes": "...", "macros": "..." }},
-        {{ "dia": "Sexta", "refeicoes": "...", "macros": "..." }},
-        {{ "dia": "Sábado", "refeicoes": "...", "macros": "..." }},
-        {{ "dia": "Domingo", "refeicoes": "...", "macros": "..." }}
+        {{
+            "dia": "Segunda-feira",
+            "foco_nutricional": "Ex: Carb Cycling Alto ou Manutenção",
+            "refeicoes": [
+                {{ "horario": "08:00", "nome": "Café da Manhã", "alimentos": "3 Ovos, 50g Aveia, Fruta" }},
+                {{ "horario": "12:00", "nome": "Almoço", "alimentos": "150g Frango, 200g Arroz, Salada" }},
+                {{ "horario": "16:00", "nome": "Lanche", "alimentos": "Whey Protein, 20g Castanhas" }},
+                {{ "horario": "20:00", "nome": "Jantar", "alimentos": "150g Peixe, Legumes, Azeite" }}
+            ],
+            "macros_totais": "P: 180g | C: 250g | G: 70g | Kcal: 2400"
+        }},
+        {{ "dia": "Terça-feira", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
+        {{ "dia": "Quarta-feira", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
+        {{ "dia": "Quinta-feira", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
+        {{ "dia": "Sexta-feira", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
+        {{ "dia": "Sábado", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }},
+        {{ "dia": "Domingo", "foco_nutricional": "...", "refeicoes": [], "macros_totais": "..." }}
       ],
       "dieta_insight": "Insight nutricional geral",
       "suplementacao": [
-        {{ "titulo": "Nome Suplemento", "detalhe": "Motivo, dosagem e como tomar" }},
-        {{ "titulo": "Nome Suplemento 2", "detalhe": "..." }},
-        {{ "titulo": "Nome Suplemento 3", "detalhe": "..." }}
+        {{ "nome": "Creatina Monohidratada", "dose": "5g", "horario": "Qualquer horário (com carbo)", "motivo": "Aumento de força e hidratação celular." }},
+        {{ "nome": "Whey Protein", "dose": "30g", "horario": "Pós-treino", "motivo": "Recuperação muscular rápida." }},
+        {{ "nome": "Multivitamínico", "dose": "1 caps", "horario": "Manhã", "motivo": "Suporte a micronutrientes." }}
       ],
       "suplementacao_insight": "Insight ortomolecular",
       "treino": [
-        {{ "dia": "Segunda", "titulo": "Grupo Muscular (ex: Peito)", "detalhe": "Lista de exercicios resumida" }},
-        {{ "dia": "Terça", "titulo": "...", "detalhe": "..." }},
-        {{ "dia": "Quarta", "titulo": "...", "detalhe": "..." }},
-        {{ "dia": "Quinta", "titulo": "...", "detalhe": "..." }},
-        {{ "dia": "Sexta", "titulo": "...", "detalhe": "..." }},
-        {{ "dia": "Sábado", "titulo": "...", "detalhe": "..." }},
-        {{ "dia": "Domingo", "titulo": "...", "detalhe": "..." }}
+        {{
+          "dia": "Segunda",
+          "foco": "Peito e Tríceps",
+          "exercicios": [
+            {{ "nome": "Supino Reto", "series_reps": "4x10-12" }},
+            {{ "nome": "Crucifixo", "series_reps": "3x12" }}
+          ],
+          "treino_alternativo": "Flexões",
+          "justificativa": "Foco em hipertrofia."
+        }},
+        {{ "dia": "Terça", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
+        {{ "dia": "Quarta", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
+        {{ "dia": "Quinta", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
+        {{ "dia": "Sexta", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
+        {{ "dia": "Sábado", "foco": "...", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }},
+        {{ "dia": "Domingo", "foco": "Descanso", "exercicios": [], "treino_alternativo": "...", "justificativa": "..." }}
       ],
-      "treino_insight": "Insight biomecânico"
+      "treino_insight": "Insight biomecânico."
     }}
     """
     
@@ -658,73 +678,217 @@ def baixar_pdf_completo(usuario: str):
         pdf.cell(0, 5, f"OBJETIVO: {sanitizar_texto(json_data.get('avaliacao', {}).get('insight', 'Alta Performance')[:50])}...", ln=True)
         pdf.ln(10)
 
-        # --- 1. AVALIAÇÃO ---
-        pdf.draw_section_title("1. ANALISE CORPORAL", icon="O")
+        # --- 1. AVALIAÇÃO (EXPANDIDA) ---
+        pdf.draw_section_title("1. ANALISE CORPORAL COMPLETA", icon="O")
         av = json_data.get('avaliacao', {})
         seg = av.get('segmentacao', {})
         dob = av.get('dobras', {})
         
-        pdf.draw_card_text("Segmentacao Corporal:", 
-                           f"- Tronco: {seg.get('tronco','')}\n- Sup: {seg.get('superior','')}\n- Inf: {seg.get('inferior','')}")
+        pdf.draw_card_text("Segmentacao Muscular:", 
+                           f"- Tronco: {seg.get('tronco','')}\n- Superior: {seg.get('superior','')}\n- Inferior: {seg.get('inferior','')}")
         pdf.ln(2)
-        pdf.draw_card_text("Estimativa de Dobras:", 
-                           f"- Abdominal: {dob.get('abdominal','')}\n- Supra: {dob.get('suprailiaca','')}")
         
-        pdf.ln(5)
-        # Insight em destaque
+        # Nova Linha para Postura e Simetria
+        pdf.set_fill_color(35, 35, 40)
+        pdf.set_text_color(0, 255, 200) # Ciano
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.cell(90, 8, "Analise Postural", 0, 0, 'L', True)
+        pdf.cell(5, 8, "", 0, 0) # Espaço
+        pdf.cell(90, 8, "Simetria", 0, 1, 'L', True)
+        
+        pdf.set_text_color(230, 230, 230)
+        pdf.set_font("Helvetica", "", 9)
+        postura = sanitizar_texto(av.get('analise_postural', 'N/A')[:200])
+        simetria = sanitizar_texto(av.get('simetria', 'N/A')[:200])
+        
+        # Bloco Postura
+        x_atual = pdf.get_x()
+        y_atual = pdf.get_y()
+        pdf.multi_cell(90, 5, postura, fill=True)
+        y_fim_1 = pdf.get_y()
+        
+        # Bloco Simetria
+        pdf.set_xy(x_atual + 95, y_atual)
+        pdf.multi_cell(90, 5, simetria, fill=True)
+        y_fim_2 = pdf.get_y()
+        
+        pdf.set_y(max(y_fim_1, y_fim_2) + 3)
+
+        pdf.draw_card_text("Estimativa de Dobras:", 
+                           f"- Abd: {dob.get('abdominal','')}\n- Supra: {dob.get('suprailiaca','')}\n- Peit: {dob.get('peitoral','')}")
+        
+        pdf.ln(2)
         pdf.set_text_color(0, 255, 200)
         pdf.set_font("Helvetica", "B", 10)
-        pdf.multi_cell(0, 6, sanitizar_texto(f">> INSIGHT: {av.get('insight', '')}"))
+        pdf.multi_cell(0, 6, sanitizar_texto(f">> INSIGHT TECNICO: {av.get('insight', '')}"))
 
-        # --- 2. DIETA (TABELA) ---
+        # --- 2. DIETA (DETALHADA EM CARDS) ---
         pdf.add_page()
         pdf.draw_section_title("2. PROTOCOLO NUTRICIONAL", icon="U")
         
-        # Cabeçalho da Tabela
-        pdf.set_fill_color(50, 50, 60)
-        pdf.set_text_color(255, 255, 255)
-        pdf.set_font("Helvetica", "B", 9)
-        pdf.cell(40, 8, "DIA DA SEMANA", 0, 0, 'L', True)
-        pdf.cell(100, 8, "REFEICOES SUGERIDAS", 0, 0, 'L', True)
-        pdf.cell(50, 8, "MACROS ALVO", 0, 1, 'L', True)
-
         dieta = json_data.get('dieta', [])
         if isinstance(dieta, list):
-            for item in dieta:
-                # Truncar texto longo para caber na tabela simples
-                ref = item.get('refeicoes', '')[:55] + "..." if len(item.get('refeicoes', '')) > 55 else item.get('refeicoes', '')
-                pdf.draw_table_row(item.get('dia', ''), ref, item.get('macros', ''))
-        
-        pdf.ln(5)
-        pdf.draw_card_text("Estrategia Nutricional:", json_data.get('dieta_insight', ''))
+            for dia in dieta:
+                pdf.ln(3)
+                # Cabeçalho do Dia
+                pdf.set_fill_color(50, 50, 60)
+                pdf.set_text_color(16, 185, 129) # Verde
+                pdf.set_font("Helvetica", "B", 10)
+                
+                header_text = sanitizar_texto(f"{dia.get('dia', '').upper()} | FOCO: {dia.get('foco_nutricional', '').upper()}")
+                pdf.cell(0, 8, header_text, 0, 1, 'L', True)
+                
+                # Lista de Refeições
+                refeicoes = dia.get('refeicoes', [])
+                pdf.set_fill_color(35, 35, 40)
+                pdf.set_text_color(230, 230, 230)
+                
+                if isinstance(refeicoes, list):
+                    for ref in refeicoes:
+                        hora = sanitizar_texto(ref.get('horario', ''))
+                        nome = sanitizar_texto(ref.get('nome', ''))
+                        alim = sanitizar_texto(ref.get('alimentos', ''))
+                        
+                        pdf.set_font("Helvetica", "B", 9)
+                        pdf.cell(30, 6, f"{hora} - {nome}:", 0, 0, 'L', True)
+                        pdf.set_font("Helvetica", "", 9)
+                        pdf.multi_cell(0, 6, alim, fill=True)
+                
+                # Footer de Macros
+                pdf.set_font("Helvetica", "I", 8)
+                pdf.set_text_color(150, 150, 150)
+                pdf.cell(0, 6, sanitizar_texto(f"Macros: {dia.get('macros_totais', '')}"), 0, 1, 'R', True)
+                
+                # Linha divisória
+                pdf.set_draw_color(30, 30, 30)
+                pdf.line(10, pdf.get_y()+2, 200, pdf.get_y()+2)
+                pdf.ln(2)
 
-        # --- 3. TREINO (TABELA) ---
+        pdf.ln(5)
+        pdf.draw_card_text("Estrategia Geral:", json_data.get('dieta_insight', ''))
+
+        # --- 3. TREINO (DETALHADO E BONITO) ---
         pdf.add_page()
         pdf.draw_section_title("3. PLANILHA DE TREINO", icon="X")
         
-        # Cabeçalho
-        pdf.set_fill_color(50, 50, 60)
-        pdf.set_text_color(255, 255, 255)
-        pdf.cell(40, 8, "DIA / GRUPO", 0, 0, 'L', True)
-        pdf.cell(150, 8, "RESUMO DO TREINO", 0, 1, 'L', True)
-
         treino = json_data.get('treino', [])
         if isinstance(treino, list):
             for item in treino:
-                titulo_dia = f"{item.get('dia','')} - {item.get('titulo','')}"[:25]
-                detalhe = item.get('detalhe', '')[:80] + "..." if len(item.get('detalhe', '')) > 80 else item.get('detalhe', '')
-                pdf.draw_table_row(titulo_dia, detalhe)
+                pdf.ln(3)
+                # Cabeçalho do Dia
+                pdf.set_fill_color(50, 50, 60)
+                pdf.set_text_color(0, 255, 200) # Destaque Ciano
+                pdf.set_font("Helvetica", "B", 10)
+                foco_dia = sanitizar_texto(f"{item.get('dia','').upper()} - FOCO: {item.get('foco','').upper()}")
+                pdf.cell(0, 8, foco_dia, 0, 1, 'L', True)
+
+                # Fundo do corpo do card de treino
+                pdf.set_fill_color(35, 35, 40)
+                pdf.set_text_color(230, 230, 230)
+                pdf.set_font("Helvetica", "", 9)
+
+                # Lista de Exercícios
+                exercicios = item.get('exercicios', [])
+                if exercicios:
+                    pdf.set_font("Helvetica", "B", 9)
+                    pdf.cell(0, 6, "Exercicios:", 0, 1, 'L', True)
+                    pdf.set_font("Helvetica", "", 9)
+                    for ex in exercicios:
+                        nome_ex = sanitizar_texto(ex.get('nome', ''))
+                        series = sanitizar_texto(ex.get('series_reps', ''))
+                        linha = f"  > {nome_ex} [{series}]"
+                        pdf.cell(0, 5, linha, 0, 1, 'L', True)
+                
+                # Alternativo e Justificativa
+                alt = sanitizar_texto(item.get('treino_alternativo', 'N/A'))
+                just = sanitizar_texto(item.get('justificativa', 'N/A'))
+                
+                pdf.ln(1)
+                pdf.set_font("Helvetica", "I", 8)
+                pdf.set_text_color(150, 150, 150)
+                pdf.multi_cell(0, 5, f"Alternativo: {alt}", fill=True)
+                pdf.multi_cell(0, 5, f"Motivo: {just}", fill=True)
+                
+                # Linha separadora entre dias
+                pdf.set_draw_color(30, 30, 30)
+                pdf.line(10, pdf.get_y()+2, 200, pdf.get_y()+2)
+                pdf.ln(2)
 
         pdf.ln(5)
-        pdf.draw_card_text("Analise Biomecanica:", json_data.get('treino_insight', ''))
+        pdf.draw_card_text("Analise Biomecanica Geral:", json_data.get('treino_insight', ''))
 
-        # --- 4. SUPLEMENTAÇÃO ---
-        pdf.ln(10)
-        pdf.draw_section_title("4. SUPLEMENTACAO", icon="+")
+        # --- 4. SUPLEMENTAÇÃO (CARDS VISUAIS) ---
+        pdf.add_page()
+        pdf.draw_section_title("4. ARSENAL DE SUPLEMENTOS", icon="+")
+        
         suple = json_data.get('suplementacao', [])
         if isinstance(suple, list):
-            for item in suple:
-                pdf.draw_table_row(item.get('titulo', ''), item.get('detalhe', ''))
+            # Layout de 2 colunas para economizar espaço
+            col_width = 90
+            spacing = 5
+            
+            for i in range(0, len(suple), 2):
+                # Pega item par e impar (coluna 1 e 2)
+                item1 = suple[i]
+                item2 = suple[i+1] if i+1 < len(suple) else None
+                
+                # Altura fixa do card
+                card_h = 35
+                
+                # --- COLUNA 1 ---
+                x_start = pdf.get_x()
+                y_start = pdf.get_y()
+                
+                # Card Background
+                pdf.set_fill_color(35, 35, 40)
+                pdf.rect(x_start, y_start, col_width, card_h, 'F')
+                
+                # Conteúdo
+                pdf.set_xy(x_start + 2, y_start + 2)
+                pdf.set_font("Helvetica", "B", 11)
+                pdf.set_text_color(255, 165, 0) # Laranja
+                pdf.cell(col_width-4, 6, sanitizar_texto(item1.get('nome', '')), 0, 1)
+                
+                pdf.set_x(x_start + 2)
+                pdf.set_font("Helvetica", "B", 9)
+                pdf.set_text_color(255, 255, 255)
+                pdf.cell(col_width-4, 5, sanitizar_texto(f"Dose: {item1.get('dose', '')} | {item1.get('horario', '')}"), 0, 1)
+                
+                pdf.set_x(x_start + 2)
+                pdf.set_font("Helvetica", "", 8)
+                pdf.set_text_color(200, 200, 200)
+                pdf.multi_cell(col_width-4, 4, sanitizar_texto(item1.get('motivo', '')))
+                
+                # --- COLUNA 2 (Se existir) ---
+                if item2:
+                    pdf.set_xy(x_start + col_width + spacing, y_start)
+                    
+                    # Card Background
+                    pdf.set_fill_color(35, 35, 40)
+                    pdf.rect(pdf.get_x(), pdf.get_y(), col_width, card_h, 'F')
+                    
+                    # Conteúdo
+                    current_x = pdf.get_x()
+                    pdf.set_xy(current_x + 2, y_start + 2)
+                    pdf.set_font("Helvetica", "B", 11)
+                    pdf.set_text_color(255, 165, 0) 
+                    pdf.cell(col_width-4, 6, sanitizar_texto(item2.get('nome', '')), 0, 1)
+                    
+                    pdf.set_x(current_x + 2)
+                    pdf.set_font("Helvetica", "B", 9)
+                    pdf.set_text_color(255, 255, 255)
+                    pdf.cell(col_width-4, 5, sanitizar_texto(f"Dose: {item2.get('dose', '')} | {item2.get('horario', '')}"), 0, 1)
+                    
+                    pdf.set_x(current_x + 2)
+                    pdf.set_font("Helvetica", "", 8)
+                    pdf.set_text_color(200, 200, 200)
+                    pdf.multi_cell(col_width-4, 4, sanitizar_texto(item2.get('motivo', '')))
+
+                # Move cursor para próxima linha de cards
+                pdf.set_xy(x_start, y_start + card_h + spacing)
+
+        pdf.ln(5)
+        pdf.draw_card_text("Insight Ortomolecular:", json_data.get('suplementacao_insight', ''))
 
         # Output
         pdf_buffer = io.BytesIO()
