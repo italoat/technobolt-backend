@@ -103,33 +103,44 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     except Exception:
         return file_bytes
 
-# --- [AJUSTE] GERADOR DE LINK COM FUZZY MATCHING NO JSON ---
+# --- [AJUSTE] GERADOR DE LINK COM FUZZY MATCHING PARA GIF DIRETO ---
 def gerar_link_fitsw(nome_exercicio):
     if not nome_exercicio: return ""
     
     # 1. Normalização (Minúsculas e sem acentos)
     nome_norm = "".join(c for c in unicodedata.normalize('NFD', nome_exercicio) if unicodedata.category(c) != 'Mn').lower().strip()
     
+    slug = None
+    
     # 2. Busca Exata no JSON Carregado
     if nome_norm in EXERCISE_DB:
         slug = EXERCISE_DB[nome_norm]
-        return f"https://www.fitsw.com/exercise-list?exercise={slug}"
     
-    # 3. Busca Aproximada (Fuzzy Match) - A Mágica do Senior Dev
-    # Se a IA mandou "Supino Reto" e no banco tem "Supino Reto com Barra", o difflib acha.
-    # cutoff=0.6 significa 60% de similaridade mínima.
-    matches = difflib.get_close_matches(nome_norm, EXERCISE_DB.keys(), n=1, cutoff=0.6)
+    # 3. Busca Aproximada (Fuzzy Match)
+    else:
+        # cutoff=0.6 significa 60% de similaridade mínima.
+        matches = difflib.get_close_matches(nome_norm, EXERCISE_DB.keys(), n=1, cutoff=0.6)
+        if matches:
+            melhor_match = matches[0]
+            slug = EXERCISE_DB[melhor_match]
     
-    if matches:
-        melhor_match = matches[0]
-        slug = EXERCISE_DB[melhor_match]
-        # print(f"Fuzzy Match: '{nome_exercicio}' -> '{melhor_match}'") # Debug se precisar
-        return f"https://www.fitsw.com/exercise-list?exercise={slug}"
+    # 4. Construção da URL do GIF
+    if slug:
+        # O slug no JSON geralmente está em snake_case (ex: barbell_bench_press)
+        # O padrão de GIF do FitSW usa PascalCase com Underscores (ex: Barbell_Bench_Press)
+        # Transformamos cada parte para Capitalize
+        slug_formatado = "_".join([part.capitalize() for part in slug.split('_')])
+        
+        # URL Final do GIF
+        return f"https://cdn.fitsw.com/assets/img/exerciseGifs/{slug_formatado}_Demo_How-to.gif"
 
-    # 4. Fallback: Formatação Simples (Se não achou nada no JSON)
-    nome_limpo = re.sub(r'[^a-z0-9\s]', '', nome_norm)
-    slug_fallback = nome_limpo.replace(" ", "_")
-    return f"https://www.fitsw.com/exercise-list?exercise={slug_fallback}"
+    # 5. Fallback: Formatação Simples (Se não achou nada no JSON, tenta a sorte formatando o nome)
+    # Remove caracteres especiais
+    nome_limpo = re.sub(r'[^a-zA-Z0-9\s]', '', unicodedata.normalize('NFD', nome_exercicio).encode('ascii', 'ignore').decode('utf-8'))
+    # Formata para PascalCase com Underscore
+    slug_fallback = "_".join([part.capitalize() for part in nome_limpo.split()])
+    
+    return f"https://cdn.fitsw.com/assets/img/exerciseGifs/{slug_fallback}_Demo_How-to.gif"
 
 # --- PDF GENERATOR ---
 
@@ -317,6 +328,7 @@ async def executar_analise(
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
+    # Atualiza dados básicos e as observações (info_add)
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
@@ -503,9 +515,12 @@ def regenerar_secao(dados: dict):
                 for ex in lista_ex:
                     ex['url_execucao'] = gerar_link_fitsw(ex.get('nome', ''))
 
+        # Cenário 1: Regeneração de Seção Completa (Lista de Dias)
         if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
             for dia in novo_dado_ia['treino']:
                 injetar_url_lista(dia.get('exercicios', []))
+        
+        # Cenário 2: Regeneração de Dia Único (Objeto Solto ou dentro de 'treino')
         elif dia_alvo:
             # Normaliza onde está o objeto do dia (as vezes a IA aninha, as vezes manda flat)
             if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
@@ -1056,16 +1071,16 @@ def baixar_pdf_completo(usuario: str):
 # --- CHAT ---
 @app.get("/chat/usuarios")
 def listar_usuarios_chat(usuario_atual: str):
-    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
-    return {"sucesso": True, "usuarios": users}
+    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
+    return {"sucesso": True, "usuarios": users}
 
 @app.get("/chat/mensagens")
 def pegar_mensagens(user1: str, user2: str):
-    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
-    for m in msgs: m['_id'] = str(m['_id'])
-    return {"sucesso": True, "mensagens": msgs}
+    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
+    for m in msgs: m['_id'] = str(m['_id'])
+    return {"sucesso": True, "mensagens": msgs}
 
 @app.post("/chat/enviar")
 def enviar_mensagem(dados: dict):
-    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
-    return {"sucesso": True}
+    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
+    return {"sucesso": True}
