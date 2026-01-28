@@ -14,15 +14,14 @@ import base64
 import random
 import pillow_heif
 from fpdf import FPDF
-import unicodedata # [NOVO] Para normalização de texto sem acentos
+import unicodedata
 
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="77.0-Elite-Granular-Refresh")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="79.0-Elite-FitSW-Migration")
 
 # --- MOTORES DE IA ---
-# [AJUSTE] Lista de modelos atualizada conforme solicitado
 MOTORES_TECHNOBOLT = [
     "models/gemini-3-flash-preview", 
     "models/gemini-2.5-flash", 
@@ -103,54 +102,166 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     except Exception:
         return file_bytes
 
-# --- [NOVO] FUNÇÃO DE GERAÇÃO DE LINK MUSCLEWIKI ---
-def gerar_link_musclewiki(nome_exercicio):
+# --- [AJUSTE CIRÚRGICO] GERADOR DE LINK PARA FITSW COM MAPEAMENTO EXATO ---
+# --- [AJUSTE] GERADOR DE LINK PARA FITSW COM BIBLIOTECA EXPANDIDA ---
+def gerar_link_fitsw(nome_exercicio):
+    """
+    Gera link compatível com FitSW garantindo tradução precisa para slugs em inglês.
+    Cobre variações biomecânicas para hipertrofia e adaptações de lesão.
+    """
     if not nome_exercicio: return ""
     
-    # Normaliza: Remove acentos e coloca em minúsculas (ex: "Elevação" -> "elevacao")
+    # Normaliza: Remove acentos e coloca em minúsculas
     nome = "".join(c for c in unicodedata.normalize('NFD', nome_exercicio) if unicodedata.category(c) != 'Mn').lower()
     
-    # Mapeamento de termos PT -> EN (Slug MuscleWiki)
-    mapa = {
-        "supino": "bench-press", "reto": "", "inclinado": "incline", "declinado": "decline",
-        "agachamento": "squat", "leg press": "leg-press", "extensora": "leg-extension", "flexora": "leg-curl",
-        "terra": "deadlift", "stiff": "stiff-leg-deadlift", "sumo": "sumo",
-        "remada": "row", "puxada": "pulldown", "barra fixa": "pull-up",
-        "desenvolvimento": "overhead-press", "elevacao": "raise", "lateral": "lateral", "frontal": "front",
-        "rosca": "curl", "direta": "bicep", "martelo": "hammer", "triceps": "triceps", "testa": "skullcrusher", "polia": "pushdown",
-        "afundo": "lunge", "bulgaro": "bulgarian-split-squat", "panturrilha": "calf-raise"
+    # Dicionário Massivo baseado no FitSW Exercise List
+    mapa_exato = {
+        # --- PEITO (Chest) ---
+        "supino reto com barra": "barbell_bench_press",
+        "supino inclinado com barra": "barbell_incline_bench_press",
+        "supino declinado com barra": "barbell_decline_bench_press",
+        "supino reto com halteres": "dumbbell_bench_press",
+        "supino inclinado com halteres": "dumbbell_incline_bench_press",
+        "supino declinado com halteres": "dumbbell_decline_bench_press",
+        "supino maquina": "machine_chest_press",
+        "crucifixo reto": "dumbbell_fly",
+        "crucifixo inclinado": "incline_dumbbell_fly",
+        "crossover": "cable_crossover",
+        "crossover polia alta": "cable_crossover",
+        "crossover polia baixa": "low_cable_crossover",
+        "peck deck": "machine_fly",
+        "voador": "machine_fly",
+        "flexao": "push_up",
+        "flexao diamante": "diamond_push_up",
+        "mergulho nas paralelas": "dips_chest_version",
+        "pull over": "dumbbell_pullover",
+
+        # --- COSTAS (Back) ---
+        "barra fixa": "pull_up",
+        "barra fixa supinada": "chin_up",
+        "puxada alta": "cable_pulldown",
+        "puxada aberta": "wide_grip_lat_pulldown",
+        "puxada fechada": "close_grip_lat_pulldown",
+        "puxada triangulo": "v_bar_pulldown",
+        "remada curvada": "barbell_bent_over_row",
+        "remada curvada supinada": "reverse_grip_bent_over_row",
+        "remada unilateral": "dumbbell_row",
+        "serrote": "dumbbell_row",
+        "remada baixa": "cable_seated_row",
+        "remada cavalinho": "t_bar_row",
+        "remada maquina": "machine_row",
+        "pulldown": "cable_straight_arm_pulldown",
+        "face pull": "cable_face_pull",
+        "levantamento terra": "barbell_deadlift",
+        "extensao lombar": "hyperextension",
+        "lombar no banco": "back_extension",
+
+        # --- PERNAS - QUADRÍCEPS/POSTERIOR (Legs) ---
+        "agachamento livre": "barbell_squat",
+        "agachamento frontal": "barbell_front_squat",
+        "agachamento sumô": "barbell_sumo_squat",
+        "agachamento com halteres": "dumbbell_squat",
+        "agachamento taça": "goblet_squat",
+        "agachamento bulgaro": "dumbbell_bulgarian_split_squat",
+        "agachamento hack": "machine_hack_squat",
+        "leg press": "leg_press",
+        "leg press 45": "leg_press",
+        "extensora": "leg_extension",
+        "mesa flexora": "lying_leg_curl",
+        "cadeira flexora": "seated_leg_curl",
+        "stiff": "barbell_stiff_leg_deadlift",
+        "stiff com halteres": "dumbbell_stiff_leg_deadlift",
+        "afundo": "dumbbell_lunge",
+        "passada": "walking_lunge",
+        "subida no banco": "step_up",
+        
+        # --- GLÚTEOS & PANTURRILHAS ---
+        "elevacao pelvica": "barbell_hip_thrust",
+        "elevacao pelvica maquina": "machine_hip_thrust",
+        "gluteo cabo": "cable_kickback",
+        "quatro apoios": "glute_kickback",
+        "panturrilha em pe": "standing_calf_raise",
+        "panturrilha sentado": "seated_calf_raise",
+        "panturrilha leg press": "calf_press_on_leg_press",
+
+        # --- OMBROS (Shoulders) ---
+        "desenvolvimento barra": "barbell_shoulder_press",
+        "desenvolvimento halteres": "dumbbell_shoulder_press",
+        "desenvolvimento militar": "military_press",
+        "desenvolvimento maquina": "machine_shoulder_press",
+        "arnold press": "arnold_press",
+        "elevacao lateral": "dumbbell_lateral_raise",
+        "elevacao lateral polia": "cable_lateral_raise",
+        "elevacao frontal": "dumbbell_front_raise",
+        "elevacao frontal polia": "cable_front_raise",
+        "crucifixo inverso": "dumbbell_rear_delt_fly",
+        "crucifixo inverso maquina": "machine_reverse_fly",
+        "remada alta": "barbell_upright_row",
+        "encolhimento": "dumbbell_shrug",
+
+        # --- BÍCEPS (Arms) ---
+        "rosca direta": "barbell_curl",
+        "rosca direta barra w": "ez_bar_curl",
+        "rosca alternada": "dumbbell_curl",
+        "rosca martelo": "dumbbell_hammer_curl",
+        "rosca scott": "preacher_curl",
+        "rosca concentrada": "concentration_curl",
+        "rosca polia baixa": "cable_curl",
+        "rosca inversa": "barbell_reverse_curl",
+        "rosca 21": "barbell_curl_21s",
+
+        # --- TRÍCEPS (Arms) ---
+        "triceps polia": "cable_triceps_pushdown",
+        "triceps corda": "cable_rope_pushdown",
+        "triceps testa": "barbell_skullcrusher",
+        "triceps frances": "dumbbell_overhead_triceps_extension",
+        "triceps coice": "dumbbell_tricep_kickback",
+        "mergulho banco": "bench_dip",
+        "triceps maquina": "machine_triceps_extension",
+
+        # --- ABDOMEN & CARDIO ---
+        "abdominal supra": "crunch",
+        "abdominal infra": "leg_raise",
+        "abdominal remador": "v_up",
+        "abdominal bicicleta": "bicycle_crunch",
+        "prancha": "plank",
+        "prancha lateral": "side_plank",
+        "russian twist": "russian_twist",
+        "corrida": "run",
+        "esteira": "treadmill",
+        "eliptico": "elliptical",
+        "bicicleta ergometrica": "cycling",
+        "pular corda": "jump_rope",
+        "burpee": "burpee",
+        "polichinelo": "jumping_jack"
+    }
+
+    # Tentativa 1: Match Exato (Prioridade)
+    for chave_pt, slug_en in mapa_exato.items():
+        if chave_pt in nome:
+            # Verifica se é um match "forte" (para evitar que 'supino reto' dê match em 'supino')
+            return f"https://www.fitsw.com/exercise-list?exercise={slug_en}"
+            
+    # Tentativa 2: Fallback Inteligente (Reconstrução para FitSW)
+    # Se a IA inventar algo como "Rosca Scott Unilateral", tentamos converter
+    termos_map = {
+        "barra": "barbell", "halter": "dumbbell", "polia": "cable", "maquina": "machine",
+        "supino": "bench_press", "agachamento": "squat", "remada": "row", 
+        "rosca": "curl", "triceps": "triceps", "biceps": "bicep", 
+        "elevacao": "raise", "lateral": "lateral", "unilateral": "single_arm"
     }
     
-    # Mapeamento de equipamentos
-    equip = "barbell" # Padrão
-    if "halter" in nome or "dumbbell" in nome: equip = "dumbbell"
-    elif "polia" in nome or "cabo" in nome or "cable" in nome: equip = "cable"
-    elif "maquina" in nome or "machine" in nome: equip = "machine"
-    elif "corporal" in nome or "livre" in nome: equip = "bodyweight"
-    elif "smith" in nome: equip = "smith-machine"
-    
-    termos_en = []
+    partes = []
     for palavra in nome.split():
-        # Verifica se a palavra ou pares de palavras estão no mapa
-        if palavra in mapa:
-            termos_en.append(mapa[palavra])
+        if palavra in termos_map:
+            partes.append(termos_map[palavra])
     
-    # Se não achou tradução específica, tenta usar o nome limpo (fallback)
-    slug_base = "-".join([t for t in termos_en if t])
-    if not slug_base:
-        # Tenta limpar caracteres especiais e usar como está
-        slug_base = re.sub(r'[^a-z0-9-]', '', nome.replace(' ', '-'))
-    
-    # Monta URL: equipment-exercise-name (Padrão MuscleWiki)
-    # Evita duplicação se o slug já tiver o equipamento
-    final_slug = slug_base
-    if equip not in slug_base:
-        final_slug = f"{equip}-{slug_base}"
-        
-    # Limpeza final de hifens duplicados
-    final_slug = re.sub(r'-+', '-', final_slug).strip('-')
-    
-    return f"https://musclewiki.com/pt-br/exercise/{final_slug}"
+    if partes:
+        slug_fallback = "_".join(partes)
+        return f"https://www.fitsw.com/exercise-list?exercise={slug_fallback}"
+
+    # Último caso: tenta o nome formatado
+    return f"https://www.fitsw.com/exercise-list?exercise={re.sub(r'[^a-z0-9_]', '', nome.replace(' ', '_'))}"
 
 # --- PDF GENERATOR PREMIUM (DARK MODE) ---
 
@@ -409,18 +520,24 @@ async def executar_analise(
     - Alimentares: {r_a}
     - Físicas: {r_f}
     - Medicamentos: {r_m}
-    - Observações Extras: {info}
+    - Observações Extras: {info} (ADAPTE O TREINO: Se houver dor no joelho, substitua Agachamento Livre por Hack ou Extensora. Se dor no ombro, evite desenvolvimentos pesados. Se dor na coluna, evite agachamentos e treinos que forcem demais esta parte).
 
     ===================================================================================
     REGRAS CRÍTICAS DE GERAÇÃO (LEIA COM ATENÇÃO):
     1. NÃO SEJA PREGUIÇOSO. Você DEVE gerar o plano COMPLETO para os 7 DIAS DA SEMANA (Segunda a Domingo).
     2. DIETA: Gere cardápios DIFERENTES ou CICLOS para TODOS OS 7 DIAS. Nada de "Repetir dia anterior".
     3. TREINO (CRÍTICO - FORMATO EXATO):
-       - Crie treinos de ALTO VOLUME (Mínimo de 8 exercícios).
-       - Cubra TODOS OS GRUPOS MUSCULARES.
-       - IMPORTANTÍSSIMO: Para CADA exercício, você deve retornar a "execucao".
-       - "execucao": Descreva a altura da polia (alta, média, baixa), a pegada (pronada, supinada, neutra), o ângulo do banco, e a biomecânica exata do movimento. 
-       - SEM EMOJIS NO RETORNO. O TEXTO DEVE SER TÉCNICO E LIMPO.
+       VOCÊ SÓ PODE USAR EXERCÍCIOS PADRÃO DE ACADEMIA (NADA DE NOMES INVENTADOS).
+       Use termos como: "Supino Reto com Barra", "Agachamento Búlgaro", "Puxada Alta", "Rosca Martelo", "Tríceps Corda".
+       SEMPRE ESPECIFIQUE O EQUIPAMENTO: (Barra, Halteres, Máquina, Polia/Cabo).
+        ESTRUTURA SEMANAL (7 DIAS):
+       - Crie uma divisão inteligente (Ex: ABC, ABCD, Upper/Lower, ou Full Body) baseada no nível do aluno.
+       - Volume: Mínimo de 6 a 12 exercícios por sessão.
+       - Para dias de descanso, prescreva "Cardio Leve" ou "Alongamento".
+        CAMPO 'EXECUCAO' (OBRIGATÓRIO E DETALHADO):
+       - Para CADA exercício, descreva a técnica perfeita em PT-BR.
+       - Inclua: Ajuste do banco, Pegada (Pronada/Supinada/Neutra), Vetor de força e Dica de segurança.
+       - SEM EMOJIS NESTE CAMPO.
     4. RESPEITE LESÕES: Se houver lesão citada, adapte o treino.
     ===================================================================================
     
@@ -483,12 +600,14 @@ async def executar_analise(
     # Parseia o JSON
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
-    # [AJUSTE CIRÚRGICO] Injeção de URL no Treino
-    if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
-        for dia in conteudo_json['treino']:
-            if 'exercicios' in dia and isinstance(dia['exercicios'], list):
-                for ex in dia['exercicios']:
-                    ex['url_execucao'] = gerar_link_musclewiki(ex.get('nome', ''))
+    # [AJUSTE CIRÚRGICO] Enriquecimento automático de URLs de exercícios (FitSW)
+    treinos = conteudo_json.get('treino', [])
+    if isinstance(treinos, list):
+        for dia in treinos:
+            exercicios = dia.get('exercicios', [])
+            for ex in exercicios:
+                nome_ex = ex.get('nome', '')
+                ex['url_execucao'] = gerar_link_fitsw(nome_ex)
 
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -563,8 +682,9 @@ def regenerar_secao(dados: dict):
         - Restrições: {r_f} (Físicas), {r_a} (Alimentares)
         - Obs: {obs}
         
-        REGRA CRÍTICA PARA TREINO:
-        Se a seção for TREINO, para CADA exercício, retorne o campo "execucao" com detalhes da altura da polia, movimento e biomecânica. SEM EMOJIS.
+        REGRA TREINO: 
+        1. CADA exercício DEVE ter campo "execucao". SEM EMOJIS.
+        2. Use NOMES PADRÃO de academia (Ex: "Supino Reto com Barra", "Agachamento Livre", "Puxada Alta", "Rosca Direta", "Leg Press"). Evite invenções.
         
         RETORNE APENAS UM JSON COM O OBJETO DESTE DIA.
         Exemplo para Dieta: {{ "dia": "{dia_alvo}", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }}
@@ -592,7 +712,7 @@ def regenerar_secao(dados: dict):
         
         REGRAS:
         1. GERE PARA OS 7 DIAS (Segunda a Domingo) se for Treino/Dieta.
-        2. TREINO: OBRIGATÓRIO incluir o campo "execucao" para CADA exercício detalhando o movimento técnico e equipamento. SEM EMOJIS.
+        2. TREINO: OBRIGATÓRIO incluir o campo "execucao" para CADA exercício detalhando o movimento técnico e equipamento. SEM EMOJIS. Use NOMES PADRÃO de academia.
         
         RETORNE APENAS UM JSON VÁLIDO com a chave correspondente à seção. Exemplo: {{ "{secao}": [ ... ] }}
         """
@@ -605,25 +725,19 @@ def regenerar_secao(dados: dict):
 
     novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
-    # [AJUSTE CIRÚRGICO] Injeção de URL na Regeneração
+    # [AJUSTE CIRÚRGICO] Enriquecimento de URLs também na regeneração
     if secao == "treino":
-        # Função auxiliar para injetar em lista de exercícios
         def injetar_url_lista(lista_ex):
             if isinstance(lista_ex, list):
                 for ex in lista_ex:
-                    ex['url_execucao'] = gerar_link_musclewiki(ex.get('nome', ''))
+                    ex['url_execucao'] = gerar_link_fitsw(ex.get('nome', ''))
 
-        # Cenário 1: Regeneração de Seção Completa (Lista de Dias)
         if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
             for dia in novo_dado_ia['treino']:
                 injetar_url_lista(dia.get('exercicios', []))
-        
-        # Cenário 2: Regeneração de Dia Único (Objeto Solto ou dentro de 'treino')
         elif dia_alvo:
-            # Normaliza onde está o objeto do dia
             obj_dia = novo_dado_ia.get('treino', novo_dado_ia)
             if isinstance(obj_dia, list) and len(obj_dia) > 0: obj_dia = obj_dia[0]
-            
             injetar_url_lista(obj_dia.get('exercicios', []))
 
     # --- LÓGICA DE ATUALIZAÇÃO NO BANCO ---
