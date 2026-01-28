@@ -127,7 +127,6 @@ def gerar_imagens_exercicio(nome_exercicio):
             folder_name = EXERCISE_DB[matches[0]]
             
     # Base URL do SEU repositório (GitHub Raw) onde a pasta 'assets/exercises' está.
-    # Ajuste o branch ('main' ou 'master') se necessário.
     base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
     
     if folder_name:
@@ -335,7 +334,6 @@ async def executar_analise(
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
-    # Atualiza dados básicos e as observações (info_add)
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
@@ -376,7 +374,7 @@ async def executar_analise(
     REGRAS DE OURO PARA O TREINO (COMPATIBILIDADE ASSETS):
     1. USE O MÁXIMO DE VARIEDADE DA BIBLIOTECA (Não fique só no básico).
        - Use: Cabos (Crossover, Polia), Halteres, Máquinas Articuladas, Smith, Peso do Corpo, Kettlebell.
-       - NADA DE NOMES INVENTADOS. Use nomes clássicos em PT-BR que correspondam às chaves do seu arquivo JSON de exercícios.
+       - NADA DE NOMES INVENTADOS. Use nomes clássicos em PT-BR que existem no seu banco de dados de exercícios (exercises.json).
          Ex: "Supino Inclinado com Halteres", "Crucifixo Inclinado", "Puxada Frente", "Remada Cavalinho", "Agachamento Búlgaro", "Stiff", "Rosca Scott", "Tríceps Testa", "Abdominal Infra".
     
     2. ESTRUTURA SEMANAL (7 DIAS):
@@ -423,11 +421,11 @@ async def executar_analise(
 
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
-    # [AJUSTE] Injeta a lista de imagens para o Frontend (0.jpg e 1.jpg)
     if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
         for dia in conteudo_json['treino']:
             if 'exercicios' in dia and isinstance(dia['exercicios'], list):
                 for ex in dia['exercicios']:
+                    # Gera a lista de imagens [0.jpg, 1.jpg]
                     ex['imagens_demonstracao'] = gerar_imagens_exercicio(ex.get('nome', ''))
 
     dossie = {
@@ -521,6 +519,7 @@ def regenerar_secao(dados: dict):
         def injetar_url_lista(lista_ex):
             if isinstance(lista_ex, list):
                 for ex in lista_ex:
+                    # Gera a lista [0.jpg, 1.jpg]
                     ex['imagens_demonstracao'] = gerar_imagens_exercicio(ex.get('nome', ''))
 
         if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
@@ -660,11 +659,7 @@ def postar_comentario(dados: dict):
         post_id = dados.get("post_id")
         usuario = dados.get("usuario")
         texto = dados.get("texto")
-
-        db.posts.update_one(
-            {"_id": ObjectId(post_id)},
-            {"$push": {"comentarios": {"autor": usuario, "texto": texto, "data": datetime.now().isoformat()}}}
-        )
+        db.posts.update_one({"_id": ObjectId(post_id)}, {"$push": {"comentarios": {"autor": usuario, "texto": texto, "data": datetime.now().isoformat()}}})
         return {"sucesso": True}
     except Exception as e:
         raise HTTPException(500, f"Erro ao postar comentário: {str(e)}")
@@ -673,7 +668,7 @@ def postar_comentario(dados: dict):
 def criar_desafio(dados: dict):
     prompt_validacao = f"Analise se este desafio é relacionado a saúde/fitness: '{dados['titulo']} - {dados.get('descricao')}'. Responda APENAS 'SIM' ou 'NAO'."
     res = rodar_ia(prompt_validacao)
-    if not res or "SIM" not in res.upper(): return {"sucesso": False, "mensagem": "A IA detectou que este desafio não é focado em saúde."}
+    if not res or "SIM" not in res.upper(): return {"sucesso": False, "mensagem": "Desafio não focado em saúde."}
     novo_desafio = {**dados, "criador": dados['usuario'], "participantes": [dados['usuario']], "ranking": {dados['usuario']: 0}, "status": "ativo"}
     db.desafios.insert_one(novo_desafio)
     return {"sucesso": True}
@@ -849,16 +844,16 @@ def baixar_pdf_completo(usuario: str):
 # --- CHAT ---
 @app.get("/chat/usuarios")
 def listar_usuarios_chat(usuario_atual: str):
-    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
-    return {"sucesso": True, "usuarios": users}
+    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
+    return {"sucesso": True, "usuarios": users}
 
 @app.get("/chat/mensagens")
 def pegar_mensagens(user1: str, user2: str):
-    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
-    for m in msgs: m['_id'] = str(m['_id'])
-    return {"sucesso": True, "mensagens": msgs}
+    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
+    for m in msgs: m['_id'] = str(m['_id'])
+    return {"sucesso": True, "mensagens": msgs}
 
 @app.post("/chat/enviar")
 def enviar_mensagem(dados: dict):
-    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
-    return {"sucesso": True}
+    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
+    return {"sucesso": True}
