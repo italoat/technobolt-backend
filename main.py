@@ -189,8 +189,8 @@ class ModernPDF(FPDF):
         # Conteúdo
         self.set_font("Helvetica", "", 10)
         self.set_text_color(*self.col_texto)
-        texto = sanitizar_texto(str(content))
-        self.multi_cell(0, 6, texto, fill=True)
+        self.texto = sanitizar_texto(str(content))
+        self.multi_cell(0, 6, self.texto, fill=True)
         self.ln(2)
 
     def draw_table_row(self, col1, col2, col3=None):
@@ -346,7 +346,7 @@ async def executar_analise(
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [PROMPT MESTRE]
+    # [PROMPT MESTRE] - AJUSTE CIRÚRGICO TREINO
     prompt_mestre = f"""
     VOCÊ É A IA DE ELITE DA TECHNOBOLT. SUA MISSÃO É CRIAR UM PROTOCOLO DE ALTA PERFORMANCE.
     
@@ -365,28 +365,21 @@ async def executar_analise(
     REGRAS CRÍTICAS DE GERAÇÃO (LEIA COM ATENÇÃO):
     1. NÃO SEJA PREGUIÇOSO. Você DEVE gerar o plano COMPLETO para os 7 DIAS DA SEMANA (Segunda a Domingo).
     2. DIETA: Gere cardápios DIFERENTES ou CICLOS para TODOS OS 7 DIAS. Nada de "Repetir dia anterior".
-    3. TREINO: O usuário pediu para MAXIMIZAR o resultado.
-       - Crie treinos de ALTO VOLUME.
-       - Mínimo de 8 a 12 EXERCÍCIOS por sessão de treino.
-       - Cubra TODOS OS GRUPOS MUSCULARES divididos durante a semana (ABC, ABCD, ou ABCDE).
-       - Se for dia de descanso, especifique cardio leve ou recuperação ativa.
-    4. RESPEITE LESÕES: Se houver lesão citada, adapte o treino (ex: lesão no joelho = sem impacto).
+    3. TREINO (CRÍTICO - FORMATO EXATO):
+       - Crie treinos de ALTO VOLUME (Mínimo de 8 exercícios).
+       - Cubra TODOS OS GRUPOS MUSCULARES.
+       - IMPORTANTÍSSIMO: Para CADA exercício, você deve retornar a "execucao".
+       - "execucao": Descreva a altura da polia (alta, média, baixa), a pegada (pronada, supinada, neutra), o ângulo do banco, e a biomecânica exata do movimento. 
+       - SEM EMOJIS NO RETORNO. O TEXTO DEVE SER TÉCNICO E LIMPO.
+    4. RESPEITE LESÕES: Se houver lesão citada, adapte o treino.
     ===================================================================================
     
     RETORNE APENAS JSON VÁLIDO (SEM MARKDOWN) NESTE FORMATO EXATO:
 
     {{
       "avaliacao": {{
-        "segmentacao": {{
-          "tronco": "Análise detalhada...",
-          "superior": "Análise detalhada...",
-          "inferior": "Análise detalhada..."
-        }},
-        "dobras": {{
-          "abdominal": "Estimativa...",
-          "suprailiaca": "Estimativa...",
-          "peitoral": "Estimativa..."
-        }},
+        "segmentacao": {{ "tronco": "...", "superior": "...", "inferior": "..." }},
+        "dobras": {{ "abdominal": "...", "suprailiaca": "...", "peitoral": "..." }},
         "analise_postural": "Texto sobre postura...",
         "simetria": "Texto sobre simetria...",
         "insight": "Insight principal."
@@ -396,25 +389,15 @@ async def executar_analise(
             "dia": "Segunda-feira",
             "foco_nutricional": "Ex: High Carb",
             "refeicoes": [
-                {{ "horario": "08:00", "nome": "Café", "alimentos": "..." }},
-                {{ "horario": "12:00", "nome": "Almoço", "alimentos": "..." }},
-                {{ "horario": "15:00", "nome": "Lanche", "alimentos": "..." }},
-                {{ "horario": "18:00", "nome": "Pré-treino", "alimentos": "..." }},
-                {{ "horario": "21:00", "nome": "Jantar", "alimentos": "..." }}
+                {{ "horario": "08:00", "nome": "Café", "alimentos": "..." }}
             ],
             "macros_totais": "P: 200g | C: 300g..."
         }},
-        {{ "dia": "Terça-feira", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
-        {{ "dia": "Quarta-feira", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
-        {{ "dia": "Quinta-feira", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
-        {{ "dia": "Sexta-feira", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
-        {{ "dia": "Sábado", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }},
-        {{ "dia": "Domingo", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }}
+        ... (REPITA PARA OS 7 DIAS)
       ],
       "dieta_insight": "Estratégia nutricional detalhada.",
       "suplementacao": [
-        {{ "nome": "Creatina", "dose": "5g", "horario": "Manhã", "motivo": "Força" }},
-        {{ "nome": "Whey", "dose": "30g", "horario": "Pós-treino", "motivo": "Recuperação" }}
+        {{ "nome": "Creatina", "dose": "5g", "horario": "Manhã", "motivo": "Força" }}
       ],
       "suplementacao_insight": "Estratégia de suplementação.",
       "treino": [
@@ -422,24 +405,21 @@ async def executar_analise(
           "dia": "Segunda-feira",
           "foco": "Costas e Bíceps (Volume Alto)",
           "exercicios": [
-            {{ "nome": "Puxada Alta", "series_reps": "4x12" }},
-            {{ "nome": "Remada Curvada", "series_reps": "4x10" }},
-            {{ "nome": "Remada Baixa", "series_reps": "3x12" }},
-            {{ "nome": "Pulldown", "series_reps": "3x15" }},
-            {{ "nome": "Crucifixo Inverso", "series_reps": "4x12" }},
-            {{ "nome": "Rosca Direta", "series_reps": "4x10" }},
-            {{ "nome": "Rosca Martelo", "series_reps": "3x12" }},
-            {{ "nome": "Rosca Scott", "series_reps": "3x15" }}
+            {{ 
+               "nome": "Puxada Alta", 
+               "series_reps": "4x12",
+               "execucao": "Polia alta. Pegada pronada aberta, maior que a largura dos ombros. Puxe a barra em direção ao topo do peito, mantendo o tronco levemente inclinado para trás. Cotovelos apontando para o chão."
+            }},
+            {{ 
+               "nome": "Rosca Martelo", 
+               "series_reps": "3x12",
+               "execucao": "Halteres. Pegada neutra. Mantenha os cotovelos fixos ao lado do tronco. Flexione o cotovelo levando o halter em direção ao ombro sem girar o punho."
+            }}
           ],
           "treino_alternativo": "Opção com halteres",
           "justificativa": "Foco em densidade dorsal."
         }},
-        {{ "dia": "Terça-feira", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
-        {{ "dia": "Quarta-feira", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
-        {{ "dia": "Quinta-feira", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
-        {{ "dia": "Sexta-feira", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
-        {{ "dia": "Sábado", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }},
-        {{ "dia": "Domingo", "foco": "...", "exercicios": [LISTA LONGA...], "..." : "..." }}
+        ... (REPITA PARA OS 7 DIAS)
       ],
       "treino_insight": "Explicação da periodização."
     }}
@@ -526,12 +506,23 @@ def regenerar_secao(dados: dict):
         - Restrições: {r_f} (Físicas), {r_a} (Alimentares)
         - Obs: {obs}
         
+        REGRA CRÍTICA PARA TREINO:
+        Se a seção for TREINO, para CADA exercício, retorne o campo "execucao" com detalhes da altura da polia, movimento e biomecânica. SEM EMOJIS.
+        
         RETORNE APENAS UM JSON COM O OBJETO DESTE DIA.
         Exemplo para Dieta: {{ "dia": "{dia_alvo}", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }}
-        Exemplo para Treino: {{ "dia": "{dia_alvo}", "foco": "...", "exercicios": [...], "treino_alternativo": "...", "justificativa": "..." }}
+        Exemplo para Treino: {{ 
+            "dia": "{dia_alvo}", 
+            "foco": "...", 
+            "exercicios": [
+               {{ "nome": "...", "series_reps": "...", "execucao": "Instrução técnica exata." }}
+            ], 
+            "treino_alternativo": "...", 
+            "justificativa": "..." 
+        }}
         """
     else:
-        # MODO: REFRESH DE SEÇÃO COMPLETA (Mantido lógica anterior)
+        # MODO: REFRESH DE SEÇÃO COMPLETA
         prompt_regeneracao = f"""
         ATENÇÃO: Você é um especialista da TechnoBolt.
         TAREFA: Reescrever COMPLETAMENTE a seção de '{secao.upper()}' para o atleta {nome}.
@@ -544,7 +535,7 @@ def regenerar_secao(dados: dict):
         
         REGRAS:
         1. GERE PARA OS 7 DIAS (Segunda a Domingo) se for Treino/Dieta.
-        2. Mantenha volume ALTO (8-12 exercícios) para treino.
+        2. TREINO: OBRIGATÓRIO incluir o campo "execucao" para CADA exercício detalhando o movimento técnico e equipamento. SEM EMOJIS.
         
         RETORNE APENAS UM JSON VÁLIDO com a chave correspondente à seção. Exemplo: {{ "{secao}": [ ... ] }}
         """
@@ -580,9 +571,7 @@ def regenerar_secao(dados: dict):
             # Substitui no índice específico
             updates[f"historico_dossies.-1.conteudo_bruto.json_full.{secao}.{idx_alvo}"] = objeto_dia
         else:
-            # Se não achou o dia (estranho), adiciona no final ou retorna erro. Vamos tentar adicionar.
-            # (Na prática, é melhor retornar erro se o dia não existe no array original, mas vamos ser permissivos)
-            # updates -> push (complexo com $set). Vamos simplificar: se não achou, ignora.
+            # Se não achou o dia, ignora
             pass
             
     else:
@@ -952,7 +941,7 @@ def baixar_pdf_completo(usuario: str):
         pdf.ln(5)
         pdf.draw_card_text("Estrategia Geral:", json_data.get('dieta_insight', ''))
 
-        # --- 3. TREINO (DETALHADO E BONITO) ---
+        # --- 3. TREINO (DETALHADO E BONITO - AJUSTE CIRÚRGICO) ---
         pdf.add_page()
         pdf.draw_section_title("3. PLANILHA DE TREINO", icon="X")
         
@@ -981,8 +970,19 @@ def baixar_pdf_completo(usuario: str):
                     for ex in exercicios:
                         nome_ex = sanitizar_texto(ex.get('nome', ''))
                         series = sanitizar_texto(ex.get('series_reps', ''))
+                        execucao = sanitizar_texto(ex.get('execucao', ''))
+                        
+                        # Linha do Exercício
                         linha = f"  > {nome_ex} [{series}]"
                         pdf.cell(0, 5, linha, 0, 1, 'L', True)
+                        
+                        # [AJUSTE PDF] Exibe a execução técnica logo abaixo
+                        if execucao:
+                            pdf.set_font("Helvetica", "I", 8)
+                            pdf.set_text_color(180, 180, 180)
+                            pdf.multi_cell(0, 4, f"     Orientacao: {execucao}", fill=True)
+                            pdf.set_font("Helvetica", "", 9)
+                            pdf.set_text_color(230, 230, 230)
                 
                 # Alternativo e Justificativa
                 alt = sanitizar_texto(item.get('treino_alternativo', 'N/A'))
