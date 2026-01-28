@@ -20,22 +20,23 @@ import difflib
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="86.0-Elite-Full-Shielded")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="88.0-Elite-HighVolume")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
+# Carrega as chaves em memória para validação rápida e blindagem
 EXERCISE_KEYS = []
 EXERCISE_DB = {}
-EXERCISE_LIST_STRING = "" # String gigante para o prompt
+EXERCISE_LIST_STRING = ""
 
 try:
     with open("exercises.json", "r", encoding="utf-8") as f:
         EXERCISE_DB = json.load(f)
-        # Normaliza as chaves e cria a lista para o prompt
+        # Normaliza as chaves para facilitar a busca
         EXERCISE_KEYS = list(EXERCISE_DB.keys())
-        # Cria uma string separada por vírgulas para a IA saber o que existe
-        EXERCISE_LIST_STRING = ", ".join([k.title() for k in EXERCISE_KEYS])
+        # Cria uma string separada por vírgulas para a IA saber EXATAMENTE o que existe
+        EXERCISE_LIST_STRING = ", ".join([k for k in EXERCISE_KEYS])
         
-    print(f"✅ Banco de Exercícios Carregado: {len(EXERCISE_DB)} itens.")
+    print(f"✅ Banco de Exercícios Carregado e Indexado: {len(EXERCISE_DB)} itens.")
 except Exception as e:
     print(f"⚠️ AVISO CRÍTICO: Erro ao carregar exercises.json. A API funcionará, mas sem imagens. Erro: {e}")
 
@@ -131,6 +132,7 @@ def validar_e_corrigir_exercicios(lista_exercicios):
     
     # Mapas auxiliares
     db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
+    # Preserva o nome original (case sensitive do JSON keys) para exibição correta
     db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
 
     for ex in lista_exercicios:
@@ -143,6 +145,8 @@ def validar_e_corrigir_exercicios(lista_exercicios):
         # 1. Match Exato
         if nome_ia_norm in db_map_norm:
             pasta_github = db_map_norm[nome_ia_norm]
+            # Usa o nome exato do JSON para ficar bonito (Capitalizado se necessário)
+            # Como as chaves do JSON estão em minúsculo na maioria, podemos dar um .title()
             nome_final = db_title_map[nome_ia_norm].title()
         else:
             # 2. Fuzzy Match (Correção de erros de digitação)
@@ -165,9 +169,9 @@ def validar_e_corrigir_exercicios(lista_exercicios):
                     nome_final = db_title_map[melhor_candidato].title()
                 else:
                     # 4. FALLBACK EXTREMO (Para nunca ficar sem imagem)
-                    # Se nada bater, pega o primeiro item do banco (ex: Abdominal) para garantir imagem
-                    # e avisa no nome que foi uma adaptação
-                    fallback_key = list(db_map_norm.keys())[0] # Pega qualquer um válido
+                    # Pega "Jumping_Jacks" (Polichinelo) que é garantido ter no repo
+                    # Tenta achar "polichinelo"
+                    fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
                     pasta_github = db_map_norm[fallback_key]
                     nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
 
@@ -181,7 +185,7 @@ def validar_e_corrigir_exercicios(lista_exercicios):
                 f"{base_url}/{pasta_github}/1.jpg"
             ]
         else:
-            ex['imagens_demonstracao'] = [] # Não deve acontecer devido ao fallback
+            ex['imagens_demonstracao'] = [] 
 
     return lista_exercicios
 
@@ -396,24 +400,27 @@ async def executar_analise(
     # [PROMPT MESTRE - BLINDADO CONTRA NULL e COM LISTA DE EXERCÍCIOS]
     prompt_mestre = f"""
     VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica e Nutrição). 
-    SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O ALUNO.
+    SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O ALUNO, MAXIMIZANDO RESULTADOS.
     
     PERFIL: {nome_completo}, {genero}, IMC {imc:.2f}, OBJETIVO: {objetivo}.
     RESTRIÇÕES: Alimentares: "{r_a}", Físicas: "{r_f}", Meds: "{r_m}", Obs: "{info}".
 
     REGRAS CRÍTICAS DE OUTPUT (SIGA RIGOROSAMENTE):
     1. **TREINO (O MAIS IMPORTANTE)**: 
-       - USE **APENAS** EXERCÍCIOS DESTA LISTA ABAIXO (PARA GARANTIR QUE TENHAMOS IMAGEM):
+       - **USE APENAS EXERCÍCIOS DESTA LISTA ABAIXO (COPIE O NOME EXATO):**
        [ {EXERCISE_LIST_STRING} ]
        - Se você escolher um exercício fora dessa lista, o aplicativo quebrará. SEJA ESTRITO.
        - Título do dia: APENAS O NOME DO DIA DA SEMANA (Ex: "Segunda-feira").
+       - Coloque o foco muscular no campo 'foco' (Ex: "Peito e Tríceps").
+       - **VOLUME ALTO DE TREINO:** Para maximizar resultados, gere entre **8 a 12 exercícios por sessão**.
+       - Gere para os 7 dias.
        - OBRIGATÓRIO: campo 'execucao' detalhado sem emojis.
 
     2. PROIBIDO RETORNAR NULL ou "Sem dados". Se faltar info, ESTIME com base no IMC e Objetivo.
-    3. AVALIAÇÃO: Gere estimativas realistas de dobras e postura.
+    3. AVALIAÇÃO: Gere estimativas realistas de dobras e postura baseadas no perfil.
     4. DIETA: OBRIGATÓRIO preencher 'macros_totais' (ex: "P: 180g | C: 200g | G: 60g"). 
        - Crie cardápios completos para 7 dias.
-    5. SUPLEMENTAÇÃO: Se o aluno não tiver restrição médica grave, sugira o básico. Preencha dose/horário.
+    5. SUPLEMENTAÇÃO: Se o aluno não tiver restrição médica grave, sugira o básico (Creatina, Whey, Multivitamínico). Preencha dose/horário.
 
     RETORNE APENAS JSON VÁLIDO:
     {{
@@ -449,7 +456,8 @@ async def executar_analise(
                "nome": "Supino Reto com Barra", 
                "series_reps": "4x10",
                "execucao": "..."
-            }}
+            }},
+            ... (Insira de 8 a 12 exercícios aqui)
           ],
           "treino_alternativo": "...",
           "justificativa": "..."
@@ -525,7 +533,6 @@ def regenerar_secao(dados: dict):
     
     if dia_alvo and secao in ["dieta", "treino"]:
         # --- REFRESH DE DIA ÚNICO ---
-        # Define o prompt específico com base na seção
         if secao == "treino":
             prompt_regeneracao = f"""
             ATENÇÃO: Treinador de Elite TechnoBolt.
@@ -534,7 +541,7 @@ def regenerar_secao(dados: dict):
             
             REGRA CRÍTICA:
             1. USE **APENAS** EXERCÍCIOS DESTA LISTA: [ {EXERCISE_LIST_STRING} ]
-            2. MANTENHA A ESTRUTURA DE OBJETO ÚNICO DO DIA.
+            2. VOLUME ALTO: Gere entre **6 a 9 exercícios**.
             3. Título do dia: APENAS "{dia_alvo}".
             
             RETORNE APENAS O JSON DO OBJETO DO DIA:
@@ -569,6 +576,7 @@ def regenerar_secao(dados: dict):
         
         REGRAS: 
         - 7 Dias. 
+        - VOLUME DE TREINO: 6 a 9 exercícios por dia.
         - Sem dados nulos. 
         - Títulos dos dias apenas o nome da semana.
         - Se for dieta, inclua 'macros_totais'.
