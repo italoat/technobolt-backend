@@ -14,6 +14,7 @@ import base64
 import random
 import pillow_heif
 from fpdf import FPDF
+import unicodedata # [NOVO] Para normalização de texto sem acentos
 
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
@@ -101,6 +102,55 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
         return output.getvalue()
     except Exception:
         return file_bytes
+
+# --- [NOVO] FUNÇÃO DE GERAÇÃO DE LINK MUSCLEWIKI ---
+def gerar_link_musclewiki(nome_exercicio):
+    if not nome_exercicio: return ""
+    
+    # Normaliza: Remove acentos e coloca em minúsculas (ex: "Elevação" -> "elevacao")
+    nome = "".join(c for c in unicodedata.normalize('NFD', nome_exercicio) if unicodedata.category(c) != 'Mn').lower()
+    
+    # Mapeamento de termos PT -> EN (Slug MuscleWiki)
+    mapa = {
+        "supino": "bench-press", "reto": "", "inclinado": "incline", "declinado": "decline",
+        "agachamento": "squat", "leg press": "leg-press", "extensora": "leg-extension", "flexora": "leg-curl",
+        "terra": "deadlift", "stiff": "stiff-leg-deadlift", "sumo": "sumo",
+        "remada": "row", "puxada": "pulldown", "barra fixa": "pull-up",
+        "desenvolvimento": "overhead-press", "elevacao": "raise", "lateral": "lateral", "frontal": "front",
+        "rosca": "curl", "direta": "bicep", "martelo": "hammer", "triceps": "triceps", "testa": "skullcrusher", "polia": "pushdown",
+        "afundo": "lunge", "bulgaro": "bulgarian-split-squat", "panturrilha": "calf-raise"
+    }
+    
+    # Mapeamento de equipamentos
+    equip = "barbell" # Padrão
+    if "halter" in nome or "dumbbell" in nome: equip = "dumbbell"
+    elif "polia" in nome or "cabo" in nome or "cable" in nome: equip = "cable"
+    elif "maquina" in nome or "machine" in nome: equip = "machine"
+    elif "corporal" in nome or "livre" in nome: equip = "bodyweight"
+    elif "smith" in nome: equip = "smith-machine"
+    
+    termos_en = []
+    for palavra in nome.split():
+        # Verifica se a palavra ou pares de palavras estão no mapa
+        if palavra in mapa:
+            termos_en.append(mapa[palavra])
+    
+    # Se não achou tradução específica, tenta usar o nome limpo (fallback)
+    slug_base = "-".join([t for t in termos_en if t])
+    if not slug_base:
+        # Tenta limpar caracteres especiais e usar como está
+        slug_base = re.sub(r'[^a-z0-9-]', '', nome.replace(' ', '-'))
+    
+    # Monta URL: equipment-exercise-name (Padrão MuscleWiki)
+    # Evita duplicação se o slug já tiver o equipamento
+    final_slug = slug_base
+    if equip not in slug_base:
+        final_slug = f"{equip}-{slug_base}"
+        
+    # Limpeza final de hifens duplicados
+    final_slug = re.sub(r'-+', '-', final_slug).strip('-')
+    
+    return f"https://musclewiki.com/pt-br/exercise/{final_slug}"
 
 # --- PDF GENERATOR PREMIUM (DARK MODE) ---
 
@@ -433,6 +483,13 @@ async def executar_analise(
     # Parseia o JSON
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
+    # [AJUSTE CIRÚRGICO] Injeção de URL no Treino
+    if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
+        for dia in conteudo_json['treino']:
+            if 'exercicios' in dia and isinstance(dia['exercicios'], list):
+                for ex in dia['exercicios']:
+                    ex['url_execucao'] = gerar_link_musclewiki(ex.get('nome', ''))
+
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "peso_reg": peso,
@@ -548,6 +605,27 @@ def regenerar_secao(dados: dict):
 
     novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
+    # [AJUSTE CIRÚRGICO] Injeção de URL na Regeneração
+    if secao == "treino":
+        # Função auxiliar para injetar em lista de exercícios
+        def injetar_url_lista(lista_ex):
+            if isinstance(lista_ex, list):
+                for ex in lista_ex:
+                    ex['url_execucao'] = gerar_link_musclewiki(ex.get('nome', ''))
+
+        # Cenário 1: Regeneração de Seção Completa (Lista de Dias)
+        if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
+            for dia in novo_dado_ia['treino']:
+                injetar_url_lista(dia.get('exercicios', []))
+        
+        # Cenário 2: Regeneração de Dia Único (Objeto Solto ou dentro de 'treino')
+        elif dia_alvo:
+            # Normaliza onde está o objeto do dia
+            obj_dia = novo_dado_ia.get('treino', novo_dado_ia)
+            if isinstance(obj_dia, list) and len(obj_dia) > 0: obj_dia = obj_dia[0]
+            
+            injetar_url_lista(obj_dia.get('exercicios', []))
+
     # --- LÓGICA DE ATUALIZAÇÃO NO BANCO ---
     updates = {}
     
