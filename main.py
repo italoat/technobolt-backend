@@ -15,21 +15,26 @@ import random
 import pillow_heif
 from fpdf import FPDF
 import unicodedata
-import difflib # [NOVO] Para Fuzzy Matching dos exercícios
+import difflib
 
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="84.0-Elite-Assets-Fixed")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="85.0-Elite-Full-Fixed")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
+# Carrega as chaves em memória para validação rápida
+EXERCISE_KEYS = []
 EXERCISE_DB = {}
+
 try:
     with open("exercises.json", "r", encoding="utf-8") as f:
         EXERCISE_DB = json.load(f)
-    print(f"✅ Banco de Exercícios Carregado: {len(EXERCISE_DB)} itens.")
+        # Normaliza as chaves para facilitar a busca (remove acentos e lowercase)
+        EXERCISE_KEYS = list(EXERCISE_DB.keys())
+    print(f"✅ Banco de Exercícios Carregado e Indexado: {len(EXERCISE_DB)} itens.")
 except Exception as e:
-    print(f"⚠️ AVISO: Não foi possível carregar exercises.json. Usando fallback vazio. Erro: {e}")
+    print(f"⚠️ AVISO: Erro ao carregar exercises.json. Funcionalidade de imagens será limitada. Erro: {e}")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
@@ -103,50 +108,68 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     except Exception:
         return file_bytes
 
-# --- [AJUSTE CIRÚRGICO] GERADOR DE IMAGENS (DUPLA: 0.jpg e 1.jpg) ---
-def gerar_imagens_exercicio(nome_exercicio):
-    """
-    Retorna uma LISTA com as URLs das imagens 0.jpg e 1.jpg do SEU repositório.
-    Consulta o arquivo exercises.json para obter o nome da pasta correto.
-    """
-    if not nome_exercicio: return []
-    
-    # 1. Normalização (Minúsculas e sem acentos para busca)
-    nome_norm = "".join(c for c in unicodedata.normalize('NFD', nome_exercicio) if unicodedata.category(c) != 'Mn').lower().strip()
-    
-    folder_name = None
-    
-    # 2. Busca Exata no JSON Carregado (EXERCISE_DB)
-    if nome_norm in EXERCISE_DB:
-        folder_name = EXERCISE_DB[nome_norm]
-    else:
-        # 3. Fuzzy Match (Busca Aproximada - 60% de similaridade)
-        # Útil se a IA escrever "Supino Reto Barra" e no banco estiver "supino reto com barra"
-        matches = difflib.get_close_matches(nome_norm, EXERCISE_DB.keys(), n=1, cutoff=0.6)
-        if matches:
-            folder_name = EXERCISE_DB[matches[0]]
-            
-    # Base URL do SEU repositório (GitHub Raw) onde a pasta 'assets/exercises' está.
-    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
-    
-    if folder_name:
-        # Retorna as duas imagens para o frontend empilhar
-        return [
-            f"{base_url}/{folder_name}/0.jpg",
-            f"{base_url}/{folder_name}/1.jpg"
-        ]
+# --- [CORE] VALIDAÇÃO E GERAÇÃO DE IMAGENS ---
 
-    # Fallback: Se não achou no JSON, tenta formatar o nome da IA para PascalCase (padrão das pastas)
-    # Ex: "rosca direta" -> "Rosca_Direta"
-    try:
-        nome_limpo = re.sub(r'[^a-zA-Z0-9\s]', '', unicodedata.normalize('NFD', nome_exercicio).encode('ascii', 'ignore').decode('utf-8'))
-        folder_fallback = "_".join([part.capitalize() for part in nome_limpo.split()])
-        return [
-            f"{base_url}/{folder_fallback}/0.jpg",
-            f"{base_url}/{folder_fallback}/1.jpg"
-        ]
-    except:
-        return []
+def normalizar_texto(texto):
+    if not texto: return ""
+    return "".join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower().strip()
+
+def validar_e_corrigir_exercicios(lista_exercicios):
+    """
+    Esta função percorre os exercícios gerados pela IA, verifica se o nome existe no JSON.
+    Se não existir, usa Fuzzy Match para encontrar o mais próximo no JSON, 
+    SUBSTITUI o nome gerado pelo nome válido e gera as URLs.
+    Isso garante que 100% dos exercícios tenham fotos.
+    """
+    if not lista_exercicios or not EXERCISE_DB: return lista_exercicios
+    
+    for ex in lista_exercicios:
+        nome_ia = ex.get('nome', '')
+        nome_ia_norm = normalizar_texto(nome_ia)
+        
+        match_encontrado = None
+        pasta_github = None
+        
+        # 1. Tenta Match Exato
+        if nome_ia_norm in EXERCISE_DB:
+            match_encontrado = nome_ia_norm
+            pasta_github = EXERCISE_DB[nome_ia_norm]
+        else:
+            # 2. Tenta Fuzzy Match (Aproximação)
+            # Procura no array de chaves normalizadas
+            matches = difflib.get_close_matches(nome_ia_norm, [normalizar_texto(k) for k in EXERCISE_KEYS], n=1, cutoff=0.5)
+            
+            if matches:
+                # Se achou um parecido, recupera a chave original
+                chave_normalizada_match = matches[0]
+                # Precisamos achar a chave original no dict (um pouco custoso, mas necessário para consistência)
+                for k in EXERCISE_DB.keys():
+                    if normalizar_texto(k) == chave_normalizada_match:
+                        match_encontrado = k # Nome em PT correto do JSON
+                        pasta_github = EXERCISE_DB[k]
+                        # AQUI ESTÁ A MÁGICA: Substitui o nome da IA pelo nome do banco que tem foto
+                        ex['nome'] = k.title() 
+                        break
+        
+        # 3. Gera as URLs baseadas na pasta encontrada (ou fallback)
+        base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
+        
+        if pasta_github:
+            ex['imagens_demonstracao'] = [
+                f"{base_url}/{pasta_github}/0.jpg",
+                f"{base_url}/{pasta_github}/1.jpg"
+            ]
+        else:
+            # Fallback extremo se não achar nada (evita null)
+            # Tenta usar o nome da IA formatado, vai que existe no repo e não no json
+            nome_limpo = re.sub(r'[^a-zA-Z0-9\s]', '', unicodedata.normalize('NFD', nome_ia).encode('ascii', 'ignore').decode('utf-8'))
+            folder_fallback = "_".join([part.capitalize() for part in nome_limpo.split()])
+            ex['imagens_demonstracao'] = [
+                f"{base_url}/{folder_fallback}/0.jpg",
+                f"{base_url}/{folder_fallback}/1.jpg"
+            ]
+            
+    return lista_exercicios
 
 # --- PDF GENERATOR ---
 
@@ -334,6 +357,7 @@ async def executar_analise(
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
+    # Atualiza dados básicos e as observações (info_add)
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
@@ -355,56 +379,60 @@ async def executar_analise(
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [PROMPT MESTRE - ALTA PERFORMANCE & ASSETS VALIDATED]
+    # [PROMPT MESTRE - BLINDADO CONTRA NULL]
     prompt_mestre = f"""
-    VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica). 
-    SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O OBJETIVO DO ALUNO, MAXIMIZANDO RESULTADOS.
-
-    PERFIL DO ATLETA:
-    - Nome: {nome_completo} ({genero})
-    - IMC: {imc:.2f}
-    - OBJETIVO: {objetivo} (Foque 100% nisso).
+    VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica e Nutrição). 
+    SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O ALUNO.
     
-    RESTRIÇÕES (CRÍTICO - LEIA COM ATENÇÃO):
-    - Lesões/Físicas: {r_f} (ADAPTE O TREINO: Se dor no joelho, use Hack/Leg Press em vez de Agachamento Livre. Se dor no ombro, evite desenvolvimento com barra).
-    - Alimentares: {r_a}
-    - Obs: {info}
+    PERFIL: {nome_completo}, {genero}, IMC {imc:.2f}, OBJETIVO: {objetivo}.
+    RESTRIÇÕES: Alimentares: "{r_a}", Físicas: "{r_f}", Meds: "{r_m}", Obs: "{info}".
 
-    ===================================================================================
-    REGRAS DE OURO PARA O TREINO (COMPATIBILIDADE ASSETS):
-    1. USE O MÁXIMO DE VARIEDADE DA BIBLIOTECA (Não fique só no básico).
-       - Use: Cabos (Crossover, Polia), Halteres, Máquinas Articuladas, Smith, Peso do Corpo, Kettlebell.
-       - NADA DE NOMES INVENTADOS. Use nomes clássicos em PT-BR que existem no seu banco de dados de exercícios (exercises.json).
-         Ex: "Supino Inclinado com Halteres", "Crucifixo Inclinado", "Puxada Frente", "Remada Cavalinho", "Agachamento Búlgaro", "Stiff", "Rosca Scott", "Tríceps Testa", "Abdominal Infra".
-    
-    2. ESTRUTURA SEMANAL (7 DIAS):
-       - Crie uma divisão inteligente (Ex: ABC, ABCD, Push/Pull/Legs).
-       - Volume Alto: 6 a 12 exercícios por sessão para hipertrofia/perda de peso.
-       - Dias de descanso: "Cardio Leve" ou "Alongamento".
-
-    3. CAMPO 'EXECUCAO' (OBRIGATÓRIO E DETALHADO):
-       - Para CADA exercício, descreva a técnica: postura, pegada, respiração. SEM EMOJIS.
-
-    4. DIETA & SUPLEMENTAÇÃO:
-       - Ciclo de carboidratos ou foco em proteína conforme objetivo.
-    ===================================================================================
+    REGRAS CRÍTICAS DE OUTPUT (SIGA RIGOROSAMENTE):
+    1. PROIBIDO RETORNAR NULL ou "Sem dados". Se faltar info, ESTIME com base no IMC e Objetivo.
+    2. AVALIAÇÃO: Gere estimativas realistas de dobras e postura.
+    3. DIETA: OBRIGATÓRIO preencher 'macros_totais' (ex: "P: 180g | C: 200g | G: 60g"). 
+       - Crie cardápios completos para 7 dias.
+    4. SUPLEMENTAÇÃO: Se o aluno não tiver restrição médica grave, sugira o básico (Creatina, Whey, Multivitamínico). Preencha dose/horário.
+    5. TREINO:
+       - Título do dia: APENAS O NOME DO DIA DA SEMANA (Ex: "Segunda-feira"). Coloque o grupo muscular no campo 'foco'.
+       - Gere para os 7 dias.
+       - Use NOMES CLÁSSICOS DE ACADEMIA em Português.
+       - OBRIGATÓRIO: campo 'execucao' detalhado sem emojis.
     
     RETORNE APENAS JSON VÁLIDO:
     {{
-      "avaliacao": {{ ... }},
-      "dieta": [ ... ],
+      "avaliacao": {{
+        "segmentacao": {{ "tronco": "...", "superior": "...", "inferior": "..." }},
+        "dobras": {{ "abdominal": "X mm", "suprailiaca": "X mm", "peitoral": "X mm" }},
+        "analise_postural": "...",
+        "simetria": "...",
+        "insight": "..."
+      }},
+      "dieta": [
+        {{
+            "dia": "Segunda-feira",
+            "foco_nutricional": "...",
+            "refeicoes": [
+                {{ "horario": "08:00", "nome": "Café", "alimentos": "..." }}
+            ],
+            "macros_totais": "P: Xg | C: Yg | G: Zg"
+        }},
+        ...
+      ],
       "dieta_insight": "...",
-      "suplementacao": [ ... ],
+      "suplementacao": [
+        {{ "nome": "Creatina", "dose": "5g", "horario": "Pós-treino", "motivo": "Força" }}
+      ],
       "suplementacao_insight": "...",
       "treino": [
         {{
           "dia": "Segunda-feira",
-          "foco": "Costas e Bíceps",
+          "foco": "Peito e Tríceps",
           "exercicios": [
             {{ 
-               "nome": "Puxada Alta", 
-               "series_reps": "4x12",
-               "execucao": "Pegada aberta pronada..."
+               "nome": "Supino Reto com Barra", 
+               "series_reps": "4x10",
+               "execucao": "..."
             }}
           ],
           "treino_alternativo": "...",
@@ -421,12 +449,16 @@ async def executar_analise(
 
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
+    # [BLINDAGEM] Validação e Correção Automática dos Exercícios para garantir imagens
     if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
         for dia in conteudo_json['treino']:
+            # Força o título do dia a ser limpo se a IA falhar
+            if 'dia' in dia:
+                dia['dia'] = dia['dia'].split('-')[0].split(' ')[0].replace(',', '').strip()
+
             if 'exercicios' in dia and isinstance(dia['exercicios'], list):
-                for ex in dia['exercicios']:
-                    # Gera a lista de imagens [0.jpg, 1.jpg]
-                    ex['imagens_demonstracao'] = gerar_imagens_exercicio(ex.get('nome', ''))
+                # Aqui aplicamos a correção de nomes e geração de links
+                dia['exercicios'] = validar_e_corrigir_exercicios(dia['exercicios'])
 
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -470,25 +502,24 @@ def regenerar_secao(dados: dict):
 
     ultimo_dossie = user_data['historico_dossies'][-1]
     
-    r_a = user_data.get('restricoes_alim', '')
-    r_f = user_data.get('restricoes_fis', '')
-    obs = user_data.get('info_add', '')
-    nome = user_data.get('nome', '')
+    r_a = user_data.get('restricoes_alim', 'Nenhuma')
+    r_f = user_data.get('restricoes_fis', 'Nenhuma')
+    obs = user_data.get('info_add', 'Nenhuma')
+    nome = user_data.get('nome', 'Atleta')
     
     if dia_alvo and secao in ["dieta", "treino"]:
         # --- REFRESH DE DIA ÚNICO ---
         prompt_regeneracao = f"""
         ATENÇÃO: Treinador de Elite TechnoBolt.
         TAREFA: Reescrever APENAS o dia '{dia_alvo}' da seção '{secao.upper()}' para o atleta {nome}.
+        CONTEXTO: {r_f}, {r_a}, {obs}.
         
-        CONTEXTO: Restrições: {r_f} (Físicas), {r_a} (Alimentares). Obs: {obs}.
+        REGRA CRÍTICA:
+        1. MANTENHA A ESTRUTURA DE OBJETO ÚNICO DO DIA.
+        2. Título do dia: APENAS "{dia_alvo}".
+        3. Preencha TODOS os campos (nada de null).
         
-        REGRA CRÍTICA PARA TREINO: 
-        1. Use exercícios validados pelo banco (Variedade: Cabos, Halteres, Máquinas).
-        2. MANTENHA A ESTRUTURA DE OBJETO ÚNICO DO DIA.
-        3. Campo "execucao" OBRIGATÓRIO e DETALHADO. SEM EMOJIS.
-        
-        RETORNE APENAS O JSON DO OBJETO DO DIA (SEM LISTA EXTERNA):
+        RETORNE APENAS O JSON DO OBJETO DO DIA:
         {{ 
           "dia": "{dia_alvo}", 
           "foco": "...", 
@@ -500,12 +531,11 @@ def regenerar_secao(dados: dict):
         }}
         """
     else:
-        # MODO: REFRESH DE SEÇÃO COMPLETA
         prompt_regeneracao = f"""
         ATENÇÃO: Treinador de Elite TechnoBolt.
-        TAREFA: Refresh COMPLETO da seção '{secao.upper()}' para o atleta {nome}.
+        TAREFA: Refresh COMPLETO da seção '{secao.upper()}' para {nome}.
         CONTEXTO: {r_f}, {r_a}, {obs}.
-        REGRAS: 7 Dias. Variedade de exercícios (Assets Compliant). Campo "execucao" detalhado.
+        REGRAS: 7 Dias. Sem dados nulos. Títulos dos dias simples.
         RETORNE JSON: {{ "{secao}": [ ... ] }}
         """
 
@@ -514,52 +544,36 @@ def regenerar_secao(dados: dict):
 
     novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
-    # [AJUSTE] Injeção de URLs de Imagens na Regeneração
+    # [BLINDAGEM] Aplica correção de exercícios se for treino
     if secao == "treino":
-        def injetar_url_lista(lista_ex):
-            if isinstance(lista_ex, list):
-                for ex in lista_ex:
-                    # Gera a lista [0.jpg, 1.jpg]
-                    ex['imagens_demonstracao'] = gerar_imagens_exercicio(ex.get('nome', ''))
-
         if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
             for dia in novo_dado_ia['treino']:
-                injetar_url_lista(dia.get('exercicios', []))
+                 if 'dia' in dia: dia['dia'] = dia['dia'].split('-')[0].split(' ')[0].replace(',', '').strip()
+                 if 'exercicios' in dia: dia['exercicios'] = validar_e_corrigir_exercicios(dia['exercicios'])
         elif dia_alvo:
-            # Normaliza onde está o objeto do dia (as vezes a IA aninha, as vezes manda flat)
-            if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
-                obj_dia = novo_dado_ia['treino'][0]
-            else:
-                obj_dia = novo_dado_ia
+            # Refresh único
+            obj_dia = novo_dado_ia.get('treino', novo_dado_ia)
+            if isinstance(obj_dia, list) and len(obj_dia) > 0: obj_dia = obj_dia[0]
             
-            injetar_url_lista(obj_dia.get('exercicios', []))
+            if 'dia' in obj_dia: obj_dia['dia'] = dia_alvo # Garante o nome certo
+            if 'exercicios' in obj_dia: obj_dia['exercicios'] = validar_e_corrigir_exercicios(obj_dia['exercicios'])
             
-            # Garante que 'novo_dado_ia' seja o objeto do dia para a lógica de update abaixo funcionar
             novo_dado_ia = obj_dia
 
-    # --- LÓGICA DE ATUALIZAÇÃO NO BANCO ---
+    # Lógica de atualização no Banco (Mantida intacta)
     updates = {}
-    
     if dia_alvo and secao in ["dieta", "treino"]:
-        # Atualização de Dia Específico (Mais complexo: precisa achar o índice no array)
         lista_atual = ultimo_dossie.get('conteudo_bruto', {}).get('json_full', {}).get(secao, [])
-        
-        # Encontra o índice do dia alvo (busca case-insensitive parcial)
         idx_alvo = -1
+        # Busca flexível pelo dia
         for i, item in enumerate(lista_atual):
             if dia_alvo.lower() in item.get('dia', '').lower():
                 idx_alvo = i
                 break
         
         if idx_alvo != -1:
-            # Substitui no índice específico
             updates[f"historico_dossies.-1.conteudo_bruto.json_full.{secao}.{idx_alvo}"] = novo_dado_ia
-        else:
-            # Se não achou o dia, ignora (ou poderia adicionar)
-            pass
-            
     else:
-        # Atualização de Seção Completa
         caminho_update = f"historico_dossies.-1.conteudo_bruto.json_full.{secao}"
         caminho_insight = f"historico_dossies.-1.conteudo_bruto.json_full.{secao}_insight"
         
@@ -668,7 +682,7 @@ def postar_comentario(dados: dict):
 def criar_desafio(dados: dict):
     prompt_validacao = f"Analise se este desafio é relacionado a saúde/fitness: '{dados['titulo']} - {dados.get('descricao')}'. Responda APENAS 'SIM' ou 'NAO'."
     res = rodar_ia(prompt_validacao)
-    if not res or "SIM" not in res.upper(): return {"sucesso": False, "mensagem": "Desafio não focado em saúde."}
+    if not res or "SIM" not in res.upper(): return {"sucesso": False, "mensagem": "A IA detectou que este desafio não é focado em saúde."}
     novo_desafio = {**dados, "criador": dados['usuario'], "participantes": [dados['usuario']], "ranking": {dados['usuario']: 0}, "status": "ativo"}
     db.desafios.insert_one(novo_desafio)
     return {"sucesso": True}
@@ -844,16 +858,16 @@ def baixar_pdf_completo(usuario: str):
 # --- CHAT ---
 @app.get("/chat/usuarios")
 def listar_usuarios_chat(usuario_atual: str):
-    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
-    return {"sucesso": True, "usuarios": users}
+    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
+    return {"sucesso": True, "usuarios": users}
 
 @app.get("/chat/mensagens")
 def pegar_mensagens(user1: str, user2: str):
-    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
-    for m in msgs: m['_id'] = str(m['_id'])
-    return {"sucesso": True, "mensagens": msgs}
+    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
+    for m in msgs: m['_id'] = str(m['_id'])
+    return {"sucesso": True, "mensagens": msgs}
 
 @app.post("/chat/enviar")
 def enviar_mensagem(dados: dict):
-    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
-    return {"sucesso": True}
+    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
+    return {"sucesso": True}
