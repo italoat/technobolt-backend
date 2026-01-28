@@ -15,11 +15,21 @@ import random
 import pillow_heif
 from fpdf import FPDF
 import unicodedata
+import difflib # [NOVO] Para Fuzzy Matching dos exercícios
 
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="79.0-Elite-FitSW-Migration")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="81.0-Elite-External-DB")
+
+# --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
+EXERCISE_DB = {}
+try:
+    with open("exercises.json", "r", encoding="utf-8") as f:
+        EXERCISE_DB = json.load(f)
+    print(f"✅ Banco de Exercícios Carregado: {len(EXERCISE_DB)} itens.")
+except Exception as e:
+    print(f"⚠️ AVISO: Não foi possível carregar exercises.json. Usando fallback. Erro: {e}")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
@@ -46,11 +56,8 @@ db = get_database()
 # --- FUNÇÕES UTILITÁRIAS GERAIS ---
 
 def rodar_ia(prompt, imagem_bytes=None):
-    # Recupera chaves do ambiente
     chaves = [os.environ.get(f"GEMINI_CHAVE_{i}") for i in range(1, 8) if os.environ.get(f"GEMINI_CHAVE_{i}")]
     img_blob = {"mime_type": "image/jpeg", "data": imagem_bytes} if imagem_bytes else None
-    
-    # Embaralha para balanceamento de carga
     random.shuffle(chaves)
     
     for chave in chaves:
@@ -58,17 +65,13 @@ def rodar_ia(prompt, imagem_bytes=None):
         for modelo in MOTORES_TECHNOBOLT:
             try:
                 model = genai.GenerativeModel(modelo)
-                # Configuração para forçar JSON e AUMENTAR O LIMITE DE TOKENS DE RESPOSTA
                 generation_config = {
                     "response_mime_type": "application/json" if "json" in prompt.lower() else "text/plain",
                     "max_output_tokens": 8192, 
                     "temperature": 0.7
                 }
-                
                 inputs = [prompt, img_blob] if img_blob else [prompt]
-                
                 response = model.generate_content(inputs, generation_config=generation_config)
-
                 if response and response.text:
                     return response.text
             except Exception as e:
@@ -77,13 +80,11 @@ def rodar_ia(prompt, imagem_bytes=None):
     return None
 
 def limpar_e_parsear_json(texto_ia):
-    """Limpa blocos de código markdown e converte para dict"""
     try:
         texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
         return json.loads(texto_limpo)
     except Exception as e:
         print(f"Erro ao parsear JSON da IA: {e}")
-        # Retorna estrutura vazia para não quebrar o app
         return {
             "avaliacao": {"insight": "Erro na leitura da IA"},
             "dieta": [],
@@ -102,177 +103,42 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     except Exception:
         return file_bytes
 
-# --- [AJUSTE CIRÚRGICO] GERADOR DE LINK PARA FITSW COM MAPEAMENTO EXATO ---
-# --- [AJUSTE] GERADOR DE LINK PARA FITSW COM BIBLIOTECA EXPANDIDA ---
+# --- [AJUSTE] GERADOR DE LINK COM FUZZY MATCHING NO JSON ---
 def gerar_link_fitsw(nome_exercicio):
-    """
-    Gera link compatível com FitSW garantindo tradução precisa para slugs em inglês.
-    Cobre variações biomecânicas para hipertrofia e adaptações de lesão.
-    """
     if not nome_exercicio: return ""
     
-    # Normaliza: Remove acentos e coloca em minúsculas
-    nome = "".join(c for c in unicodedata.normalize('NFD', nome_exercicio) if unicodedata.category(c) != 'Mn').lower()
+    # 1. Normalização (Minúsculas e sem acentos)
+    nome_norm = "".join(c for c in unicodedata.normalize('NFD', nome_exercicio) if unicodedata.category(c) != 'Mn').lower().strip()
     
-    # Dicionário Massivo baseado no FitSW Exercise List
-    mapa_exato = {
-        # --- PEITO (Chest) ---
-        "supino reto com barra": "barbell_bench_press",
-        "supino inclinado com barra": "barbell_incline_bench_press",
-        "supino declinado com barra": "barbell_decline_bench_press",
-        "supino reto com halteres": "dumbbell_bench_press",
-        "supino inclinado com halteres": "dumbbell_incline_bench_press",
-        "supino declinado com halteres": "dumbbell_decline_bench_press",
-        "supino maquina": "machine_chest_press",
-        "crucifixo reto": "dumbbell_fly",
-        "crucifixo inclinado": "incline_dumbbell_fly",
-        "crossover": "cable_crossover",
-        "crossover polia alta": "cable_crossover",
-        "crossover polia baixa": "low_cable_crossover",
-        "peck deck": "machine_fly",
-        "voador": "machine_fly",
-        "flexao": "push_up",
-        "flexao diamante": "diamond_push_up",
-        "mergulho nas paralelas": "dips_chest_version",
-        "pull over": "dumbbell_pullover",
-
-        # --- COSTAS (Back) ---
-        "barra fixa": "pull_up",
-        "barra fixa supinada": "chin_up",
-        "puxada alta": "cable_pulldown",
-        "puxada aberta": "wide_grip_lat_pulldown",
-        "puxada fechada": "close_grip_lat_pulldown",
-        "puxada triangulo": "v_bar_pulldown",
-        "remada curvada": "barbell_bent_over_row",
-        "remada curvada supinada": "reverse_grip_bent_over_row",
-        "remada unilateral": "dumbbell_row",
-        "serrote": "dumbbell_row",
-        "remada baixa": "cable_seated_row",
-        "remada cavalinho": "t_bar_row",
-        "remada maquina": "machine_row",
-        "pulldown": "cable_straight_arm_pulldown",
-        "face pull": "cable_face_pull",
-        "levantamento terra": "barbell_deadlift",
-        "extensao lombar": "hyperextension",
-        "lombar no banco": "back_extension",
-
-        # --- PERNAS - QUADRÍCEPS/POSTERIOR (Legs) ---
-        "agachamento livre": "barbell_squat",
-        "agachamento frontal": "barbell_front_squat",
-        "agachamento sumô": "barbell_sumo_squat",
-        "agachamento com halteres": "dumbbell_squat",
-        "agachamento taça": "goblet_squat",
-        "agachamento bulgaro": "dumbbell_bulgarian_split_squat",
-        "agachamento hack": "machine_hack_squat",
-        "leg press": "leg_press",
-        "leg press 45": "leg_press",
-        "extensora": "leg_extension",
-        "mesa flexora": "lying_leg_curl",
-        "cadeira flexora": "seated_leg_curl",
-        "stiff": "barbell_stiff_leg_deadlift",
-        "stiff com halteres": "dumbbell_stiff_leg_deadlift",
-        "afundo": "dumbbell_lunge",
-        "passada": "walking_lunge",
-        "subida no banco": "step_up",
-        
-        # --- GLÚTEOS & PANTURRILHAS ---
-        "elevacao pelvica": "barbell_hip_thrust",
-        "elevacao pelvica maquina": "machine_hip_thrust",
-        "gluteo cabo": "cable_kickback",
-        "quatro apoios": "glute_kickback",
-        "panturrilha em pe": "standing_calf_raise",
-        "panturrilha sentado": "seated_calf_raise",
-        "panturrilha leg press": "calf_press_on_leg_press",
-
-        # --- OMBROS (Shoulders) ---
-        "desenvolvimento barra": "barbell_shoulder_press",
-        "desenvolvimento halteres": "dumbbell_shoulder_press",
-        "desenvolvimento militar": "military_press",
-        "desenvolvimento maquina": "machine_shoulder_press",
-        "arnold press": "arnold_press",
-        "elevacao lateral": "dumbbell_lateral_raise",
-        "elevacao lateral polia": "cable_lateral_raise",
-        "elevacao frontal": "dumbbell_front_raise",
-        "elevacao frontal polia": "cable_front_raise",
-        "crucifixo inverso": "dumbbell_rear_delt_fly",
-        "crucifixo inverso maquina": "machine_reverse_fly",
-        "remada alta": "barbell_upright_row",
-        "encolhimento": "dumbbell_shrug",
-
-        # --- BÍCEPS (Arms) ---
-        "rosca direta": "barbell_curl",
-        "rosca direta barra w": "ez_bar_curl",
-        "rosca alternada": "dumbbell_curl",
-        "rosca martelo": "dumbbell_hammer_curl",
-        "rosca scott": "preacher_curl",
-        "rosca concentrada": "concentration_curl",
-        "rosca polia baixa": "cable_curl",
-        "rosca inversa": "barbell_reverse_curl",
-        "rosca 21": "barbell_curl_21s",
-
-        # --- TRÍCEPS (Arms) ---
-        "triceps polia": "cable_triceps_pushdown",
-        "triceps corda": "cable_rope_pushdown",
-        "triceps testa": "barbell_skullcrusher",
-        "triceps frances": "dumbbell_overhead_triceps_extension",
-        "triceps coice": "dumbbell_tricep_kickback",
-        "mergulho banco": "bench_dip",
-        "triceps maquina": "machine_triceps_extension",
-
-        # --- ABDOMEN & CARDIO ---
-        "abdominal supra": "crunch",
-        "abdominal infra": "leg_raise",
-        "abdominal remador": "v_up",
-        "abdominal bicicleta": "bicycle_crunch",
-        "prancha": "plank",
-        "prancha lateral": "side_plank",
-        "russian twist": "russian_twist",
-        "corrida": "run",
-        "esteira": "treadmill",
-        "eliptico": "elliptical",
-        "bicicleta ergometrica": "cycling",
-        "pular corda": "jump_rope",
-        "burpee": "burpee",
-        "polichinelo": "jumping_jack"
-    }
-
-    # Tentativa 1: Match Exato (Prioridade)
-    for chave_pt, slug_en in mapa_exato.items():
-        if chave_pt in nome:
-            # Verifica se é um match "forte" (para evitar que 'supino reto' dê match em 'supino')
-            return f"https://www.fitsw.com/exercise-list?exercise={slug_en}"
-            
-    # Tentativa 2: Fallback Inteligente (Reconstrução para FitSW)
-    # Se a IA inventar algo como "Rosca Scott Unilateral", tentamos converter
-    termos_map = {
-        "barra": "barbell", "halter": "dumbbell", "polia": "cable", "maquina": "machine",
-        "supino": "bench_press", "agachamento": "squat", "remada": "row", 
-        "rosca": "curl", "triceps": "triceps", "biceps": "bicep", 
-        "elevacao": "raise", "lateral": "lateral", "unilateral": "single_arm"
-    }
+    # 2. Busca Exata no JSON Carregado
+    if nome_norm in EXERCISE_DB:
+        slug = EXERCISE_DB[nome_norm]
+        return f"https://www.fitsw.com/exercise-list?exercise={slug}"
     
-    partes = []
-    for palavra in nome.split():
-        if palavra in termos_map:
-            partes.append(termos_map[palavra])
+    # 3. Busca Aproximada (Fuzzy Match) - A Mágica do Senior Dev
+    # Se a IA mandou "Supino Reto" e no banco tem "Supino Reto com Barra", o difflib acha.
+    # cutoff=0.6 significa 60% de similaridade mínima.
+    matches = difflib.get_close_matches(nome_norm, EXERCISE_DB.keys(), n=1, cutoff=0.6)
     
-    if partes:
-        slug_fallback = "_".join(partes)
-        return f"https://www.fitsw.com/exercise-list?exercise={slug_fallback}"
+    if matches:
+        melhor_match = matches[0]
+        slug = EXERCISE_DB[melhor_match]
+        # print(f"Fuzzy Match: '{nome_exercicio}' -> '{melhor_match}'") # Debug se precisar
+        return f"https://www.fitsw.com/exercise-list?exercise={slug}"
 
-    # Último caso: tenta o nome formatado
-    return f"https://www.fitsw.com/exercise-list?exercise={re.sub(r'[^a-z0-9_]', '', nome.replace(' ', '_'))}"
+    # 4. Fallback: Formatação Simples (Se não achou nada no JSON)
+    nome_limpo = re.sub(r'[^a-z0-9\s]', '', nome_norm)
+    slug_fallback = nome_limpo.replace(" ", "_")
+    return f"https://www.fitsw.com/exercise-list?exercise={slug_fallback}"
 
-# --- PDF GENERATOR PREMIUM (DARK MODE) ---
+# --- PDF GENERATOR ---
 
 def sanitizar_texto(texto):
-    """Remove emojis e caracteres incompatíveis com Latin-1 do PDF"""
     if not texto: return ""
     if not isinstance(texto, str): texto = str(texto)
     texto = texto.replace("🚀", ">>").replace("✅", "[OK]").replace("⚠️", "[!]")
     texto = texto.replace("💊", "").replace("🥗", "").replace("🏋️", "").replace("📊", "")
     texto = texto.replace("**", "").replace("###", "").replace("##", "")
-    # Substituições comuns de aspas e travessões
     texto = texto.replace("–", "-").replace("“", '"').replace("”", '"')
     return texto.encode('latin-1', 'replace').decode('latin-1')
 
@@ -280,38 +146,28 @@ class ModernPDF(FPDF):
     def __init__(self):
         super().__init__()
         self.set_auto_page_break(auto=True, margin=15)
-        # Cores da Marca (Dark Mode)
-        self.col_fundo = (20, 20, 25)      # Preto Suave (Background)
-        self.col_card = (35, 35, 40)       # Cinza Card
-        self.col_azul = (59, 130, 246)     # Azul TechnoBolt
-        self.col_texto = (230, 230, 230)   # Branco Gelo
-        self.col_destaque = (0, 255, 200)  # Ciano Neon
-        self.col_verde = (16, 185, 129)    # Verde Sucesso
+        self.col_fundo = (20, 20, 25)
+        self.col_card = (35, 35, 40)
+        self.col_azul = (59, 130, 246)
+        self.col_texto = (230, 230, 230)
+        self.col_destaque = (0, 255, 200)
+        self.col_verde = (16, 185, 129)
 
     def header(self):
-        # Fundo total da página
         self.set_fill_color(*self.col_fundo)
         self.rect(0, 0, 210, 297, 'F')
-        
-        # Barra superior
         self.set_fill_color(10, 10, 15)
         self.rect(0, 0, 210, 35, 'F')
-        
-        # Logo (Texto Estilizado)
         self.set_xy(10, 10)
         self.set_font("Helvetica", "B", 24)
         self.set_text_color(*self.col_azul)
         self.cell(60, 10, "TECHNOBOLT", 0, 0)
         self.set_text_color(255, 255, 255)
         self.cell(40, 10, "GYM HUB", 0, 1)
-        
-        # Subtitulo
         self.set_font("Helvetica", "", 8)
         self.set_text_color(150, 150, 150)
         self.set_xy(10, 20)
         self.cell(0, 5, "RELATORIO DE ALTA PERFORMANCE | PHP PROTOCOL", 0, 1)
-        
-        # Linha decorativa
         self.set_draw_color(*self.col_destaque)
         self.set_line_width(0.5)
         self.line(10, 35, 200, 35)
@@ -330,24 +186,17 @@ class ModernPDF(FPDF):
         self.cell(10, 10, icon, 0, 0)
         self.set_text_color(*self.col_azul)
         self.cell(0, 10, sanitizar_texto(title.upper()), 0, 1)
-        
-        # Linha sutil abaixo do título
         self.set_draw_color(50, 50, 60)
         self.line(10, self.get_y(), 100, self.get_y())
         self.ln(5)
 
     def draw_card_text(self, label, content):
-        """Desenha um bloco de texto com fundo diferenciado"""
         self.set_fill_color(*self.col_card)
         self.set_text_color(*self.col_texto)
         self.set_font("Helvetica", "", 10)
-        
-        # Título do bloco
         self.set_font("Helvetica", "B", 11)
         self.set_text_color(*self.col_azul)
         self.multi_cell(0, 6, sanitizar_texto(label), fill=True)
-        
-        # Conteúdo
         self.set_font("Helvetica", "", 10)
         self.set_text_color(*self.col_texto)
         self.texto = sanitizar_texto(str(content))
@@ -355,24 +204,17 @@ class ModernPDF(FPDF):
         self.ln(2)
 
     def draw_table_row(self, col1, col2, col3=None):
-        """Linha de tabela personalizada"""
         self.set_fill_color(*self.col_card)
         self.set_text_color(*self.col_texto)
         self.set_font("Helvetica", "", 9)
         self.set_draw_color(*self.col_fundo) 
         self.set_line_width(0.3)
-        
         h = 8 
-        
-        # Coluna 1
         self.set_font("Helvetica", "B", 9)
         self.set_text_color(*self.col_destaque)
         self.cell(40, h, sanitizar_texto(col1), 1, 0, 'L', True)
-        
-        # Coluna 2
         self.set_font("Helvetica", "", 9)
         self.set_text_color(*self.col_texto)
-        
         if col3:
             self.cell(100, h, sanitizar_texto(col2), 1, 0, 'L', True)
             self.set_font("Helvetica", "I", 8)
@@ -387,28 +229,21 @@ def calcular_medalha(username):
     try:
         desafios = list(db.desafios.find({"participantes": username}))
         if not desafios: return ""
-
         melhor_nivel = 4 
-
         for d in desafios:
             ranking = d.get('ranking', {})
             if not ranking: continue
-            
             ordenados = sorted(ranking.items(), key=lambda x: x[1], reverse=True)
             total_participantes = len(ordenados)
-            
             if total_participantes == 0: continue
-
             try:
                 posicao = [i for i, (u, s) in enumerate(ordenados, 1) if u == username][0]
                 percentual = posicao / total_participantes
-
                 if percentual <= 0.20: melhor_nivel = min(melhor_nivel, 1)
                 elif percentual <= 0.30: melhor_nivel = min(melhor_nivel, 2)
                 else: melhor_nivel = min(melhor_nivel, 3)
             except IndexError:
                 continue
-
         mapeamento = {1: "🥇", 2: "🥈", 3: "🥉"}
         return mapeamento.get(melhor_nivel, "")
     except Exception:
@@ -420,10 +255,8 @@ def calcular_medalha(username):
 def login(dados: dict):
     user = db.usuarios.find_one({"usuario": dados['usuario'], "senha": dados['senha']})
     if not user: raise HTTPException(401, "Credenciais inválidas")
-    
     if user.get("status") != "ativo" and not user.get("is_admin"):
         raise HTTPException(403, "Sua conta está aguardando ativação pelo administrador.")
-        
     return {
         "sucesso": True,
         "dados": {
@@ -445,7 +278,6 @@ def login(dados: dict):
 def registrar(dados: dict):
     if db.usuarios.find_one({"usuario": dados['usuario']}):
         raise HTTPException(400, "Usuário já existe")
-    
     novo_user = {
         **dados,
         "status": "pendente",
@@ -485,7 +317,6 @@ async def executar_analise(
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
-    # Atualiza dados básicos e as observações (info_add)
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
@@ -507,115 +338,83 @@ async def executar_analise(
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [PROMPT MESTRE] - AJUSTE CIRÚRGICO TREINO
+    # [PROMPT MESTRE - ALTA PERFORMANCE & FITSW VALIDATED]
     prompt_mestre = f"""
-    VOCÊ É A IA DE ELITE DA TECHNOBOLT. SUA MISSÃO É CRIAR UM PROTOCOLO DE ALTA PERFORMANCE.
-    
-    DADOS DO ATLETA:
+    VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica). 
+    SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O OBJETIVO DO ALUNO, MAXIMIZANDO RESULTADOS.
+
+    PERFIL DO ATLETA:
     - Nome: {nome_completo} ({genero})
     - IMC: {imc:.2f}
-    - Objetivo: {objetivo} (FOCO TOTAL EM RESULTADO MÁXIMO)
+    - OBJETIVO: {objetivo} (Foque 100% nisso).
     
-    RESTRIÇÕES E OBSERVAÇÕES (OBRIGATÓRIO RESPEITAR):
+    RESTRIÇÕES (CRÍTICO - LEIA COM ATENÇÃO):
+    - Lesões/Físicas: {r_f} (ADAPTE O TREINO: Se dor no joelho, use Hack/Leg Press em vez de Agachamento Livre. Se dor no ombro, evite desenvolvimento com barra).
     - Alimentares: {r_a}
-    - Físicas: {r_f}
-    - Medicamentos: {r_m}
-    - Observações Extras: {info} (ADAPTE O TREINO: Se houver dor no joelho, substitua Agachamento Livre por Hack ou Extensora. Se dor no ombro, evite desenvolvimentos pesados. Se dor na coluna, evite agachamentos e treinos que forcem demais esta parte).
+    - Obs: {info}
 
     ===================================================================================
-    REGRAS CRÍTICAS DE GERAÇÃO (LEIA COM ATENÇÃO):
-    1. NÃO SEJA PREGUIÇOSO. Você DEVE gerar o plano COMPLETO para os 7 DIAS DA SEMANA (Segunda a Domingo).
-    2. DIETA: Gere cardápios DIFERENTES ou CICLOS para TODOS OS 7 DIAS. Nada de "Repetir dia anterior".
-    3. TREINO (CRÍTICO - FORMATO EXATO):
-       VOCÊ SÓ PODE USAR EXERCÍCIOS PADRÃO DE ACADEMIA (NADA DE NOMES INVENTADOS).
-       Use termos como: "Supino Reto com Barra", "Agachamento Búlgaro", "Puxada Alta", "Rosca Martelo", "Tríceps Corda".
-       SEMPRE ESPECIFIQUE O EQUIPAMENTO: (Barra, Halteres, Máquina, Polia/Cabo).
-        ESTRUTURA SEMANAL (7 DIAS):
-       - Crie uma divisão inteligente (Ex: ABC, ABCD, Upper/Lower, ou Full Body) baseada no nível do aluno.
-       - Volume: Mínimo de 6 a 12 exercícios por sessão.
-       - Para dias de descanso, prescreva "Cardio Leve" ou "Alongamento".
-        CAMPO 'EXECUCAO' (OBRIGATÓRIO E DETALHADO):
-       - Para CADA exercício, descreva a técnica perfeita em PT-BR.
-       - Inclua: Ajuste do banco, Pegada (Pronada/Supinada/Neutra), Vetor de força e Dica de segurança.
-       - SEM EMOJIS NESTE CAMPO.
-    4. RESPEITE LESÕES: Se houver lesão citada, adapte o treino.
+    REGRAS DE OURO PARA O TREINO (COMPATIBILIDADE FITSW):
+    1. USE O MÁXIMO DE VARIEDADE DA BIBLIOTECA (Não fique só no básico).
+       - Use: Cabos (Crossover, Polia), Halteres, Máquinas Articuladas, Smith, Peso do Corpo, Kettlebell.
+       - NADA DE NOMES INVENTADOS. Use nomes clássicos em PT-BR que existem no dicionário FitSW.
+         Tente usar os nomes que constam na base de dados (Ex: Supino Reto com Barra, Crossover, Puxada Alta).
+    
+    2. ESTRUTURA SEMANAL (7 DIAS):
+       - Crie uma divisão inteligente (Ex: ABC, ABCD, Push/Pull/Legs).
+       - Volume Alto: 6 a 12 exercícios por sessão para hipertrofia/perda de peso.
+       - Dias de descanso: "Cardio Leve" ou "Alongamento".
+
+    3. CAMPO 'EXECUCAO' (OBRIGATÓRIO E DETALHADO):
+       - Para CADA exercício, descreva a técnica: postura, pegada, respiração. SEM EMOJIS.
+
+    4. DIETA & SUPLEMENTAÇÃO:
+       - Ciclo de carboidratos ou foco em proteína conforme objetivo.
     ===================================================================================
     
-    RETORNE APENAS JSON VÁLIDO (SEM MARKDOWN) NESTE FORMATO EXATO:
-
+    RETORNE APENAS JSON VÁLIDO:
     {{
-      "avaliacao": {{
-        "segmentacao": {{ "tronco": "...", "superior": "...", "inferior": "..." }},
-        "dobras": {{ "abdominal": "...", "suprailiaca": "...", "peitoral": "..." }},
-        "analise_postural": "Texto sobre postura...",
-        "simetria": "Texto sobre simetria...",
-        "insight": "Insight principal."
-      }},
-      "dieta": [
-        {{
-            "dia": "Segunda-feira",
-            "foco_nutricional": "Ex: High Carb",
-            "refeicoes": [
-                {{ "horario": "08:00", "nome": "Café", "alimentos": "..." }}
-            ],
-            "macros_totais": "P: 200g | C: 300g..."
-        }},
-        ... (REPITA PARA OS 7 DIAS)
-      ],
-      "dieta_insight": "Estratégia nutricional detalhada.",
-      "suplementacao": [
-        {{ "nome": "Creatina", "dose": "5g", "horario": "Manhã", "motivo": "Força" }}
-      ],
-      "suplementacao_insight": "Estratégia de suplementação.",
+      "avaliacao": {{ ... }},
+      "dieta": [ ... ],
+      "dieta_insight": "...",
+      "suplementacao": [ ... ],
+      "suplementacao_insight": "...",
       "treino": [
         {{
           "dia": "Segunda-feira",
-          "foco": "Costas e Bíceps (Volume Alto)",
+          "foco": "Costas e Bíceps",
           "exercicios": [
             {{ 
                "nome": "Puxada Alta", 
                "series_reps": "4x12",
-               "execucao": "Polia alta. Pegada pronada aberta, maior que a largura dos ombros. Puxe a barra em direção ao topo do peito, mantendo o tronco levemente inclinado para trás. Cotovelos apontando para o chão."
-            }},
-            {{ 
-               "nome": "Rosca Martelo", 
-               "series_reps": "3x12",
-               "execucao": "Halteres. Pegada neutra. Mantenha os cotovelos fixos ao lado do tronco. Flexione o cotovelo levando o halter em direção ao ombro sem girar o punho."
+               "execucao": "Pegada aberta pronada..."
             }}
           ],
-          "treino_alternativo": "Opção com halteres",
-          "justificativa": "Foco em densidade dorsal."
+          "treino_alternativo": "...",
+          "justificativa": "..."
         }},
-        ... (REPITA PARA OS 7 DIAS)
+        ...
       ],
-      "treino_insight": "Explicação da periodização."
+      "treino_insight": "..."
     }}
     """
     
     resultado_raw = rodar_ia(prompt_mestre, img_otimizada)
-    
-    if not resultado_raw:
-        raise HTTPException(503, "IA Indisponível.")
+    if not resultado_raw: raise HTTPException(503, "IA Indisponível.")
 
-    # Parseia o JSON
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
-    # [AJUSTE CIRÚRGICO] Enriquecimento automático de URLs de exercícios (FitSW)
-    treinos = conteudo_json.get('treino', [])
-    if isinstance(treinos, list):
-        for dia in treinos:
-            exercicios = dia.get('exercicios', [])
-            for ex in exercicios:
-                nome_ex = ex.get('nome', '')
-                ex['url_execucao'] = gerar_link_fitsw(nome_ex)
+    if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
+        for dia in conteudo_json['treino']:
+            if 'exercicios' in dia and isinstance(dia['exercicios'], list):
+                for ex in dia['exercicios']:
+                    ex['url_execucao'] = gerar_link_fitsw(ex.get('nome', ''))
 
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "peso_reg": peso,
         "conteudo_bruto": {
-            # JSON puro para o novo Flutter
             "json_full": conteudo_json,
-            # Fallback para versões antigas
             "r1": conteudo_json.get('avaliacao', {}).get('insight', ''),
             "r2": conteudo_json.get('dieta_insight', ''),
             "r3": conteudo_json.get('suplementacao_insight', ''),
@@ -630,98 +429,70 @@ async def executar_analise(
     
     return {"sucesso": True, "resultado": dossie}
 
-# --- ENDPOINT ATUALIZADO: REGENERAR SEÇÃO OU DIA ESPECÍFICO COM CUSTO ---
 @app.post("/analise/regenerar-secao")
 def regenerar_secao(dados: dict):
-    # dados esperados: 
-    # {
-    #   "usuario": "...", 
-    #   "secao": "dieta" | "treino" | "suplementacao" | "avaliacao",
-    #   "dia": "Quinta-feira" (Opcional - Se enviado, regenera apenas este dia)
-    # }
     usuario = dados.get("usuario")
     secao = dados.get("secao")
-    dia_alvo = dados.get("dia") # Parâmetro opcional para granularidade
+    dia_alvo = dados.get("dia") 
     
     if not usuario or secao not in ["dieta", "treino", "suplementacao", "avaliacao"]:
-        return {"sucesso": False, "mensagem": "Seção inválida ou usuário não informado."}
+        return {"sucesso": False, "mensagem": "Seção inválida."}
 
     user_data = db.usuarios.find_one({"usuario": usuario})
-    if not user_data:
-        return {"sucesso": False, "mensagem": "Usuário não encontrado."}
+    if not user_data: return {"sucesso": False, "mensagem": "Usuário não encontrado."}
     
-    # [AJUSTE] Verificação de Créditos
     creditos = user_data.get('avaliacoes_restantes', 0)
     is_admin = user_data.get('is_admin', False)
 
     if creditos <= 0 and not is_admin:
-        return {"sucesso": False, "mensagem": "Saldo de créditos insuficiente para regenerar."}
+        return {"sucesso": False, "mensagem": "Saldo insuficiente."}
 
     if not user_data.get('historico_dossies'):
-        return {"sucesso": False, "mensagem": "Nenhum histórico encontrado para basear a regeneração."}
+        return {"sucesso": False, "mensagem": "Sem histórico."}
 
-    # Pega o último dossiê para contexto
     ultimo_dossie = user_data['historico_dossies'][-1]
     
-    # Dados de contexto
-    r_a = user_data.get('restricoes_alim', 'Nenhuma')
-    r_f = user_data.get('restricoes_fis', 'Nenhuma')
-    obs = user_data.get('info_add', 'Nenhuma')
-    nome = user_data.get('nome', 'Atleta')
+    r_a = user_data.get('restricoes_alim', '')
+    r_f = user_data.get('restricoes_fis', '')
+    obs = user_data.get('info_add', '')
+    nome = user_data.get('nome', '')
     
-    # --- LÓGICA DE PROMPT (DIA ESPECÍFICO VS SEÇÃO COMPLETA) ---
     if dia_alvo and secao in ["dieta", "treino"]:
-        # MODO: REFRESH DE DIA ÚNICO
+        # --- REFRESH DE DIA ÚNICO (RETORNA APENAS O OBJETO DO DIA) ---
         prompt_regeneracao = f"""
-        ATENÇÃO: Você é um especialista da TechnoBolt.
+        ATENÇÃO: Treinador de Elite TechnoBolt.
         TAREFA: Reescrever APENAS o dia '{dia_alvo}' da seção '{secao.upper()}' para o atleta {nome}.
         
-        O usuário quer mudar especificamente a rotina deste dia. Mantenha a intensidade alta.
+        CONTEXTO: Restrições: {r_f} (Físicas), {r_a} (Alimentares). Obs: {obs}.
         
-        CONTEXTO:
-        - Restrições: {r_f} (Físicas), {r_a} (Alimentares)
-        - Obs: {obs}
+        REGRA CRÍTICA PARA TREINO: 
+        1. Use exercícios da biblioteca FitSW (Variedade: Cabos, Halteres, Máquinas).
+        2. MANTENHA A ESTRUTURA DE OBJETO ÚNICO DO DIA.
+        3. Campo "execucao" OBRIGATÓRIO e DETALHADO. SEM EMOJIS.
         
-        REGRA TREINO: 
-        1. CADA exercício DEVE ter campo "execucao". SEM EMOJIS.
-        2. Use NOMES PADRÃO de academia (Ex: "Supino Reto com Barra", "Agachamento Livre", "Puxada Alta", "Rosca Direta", "Leg Press"). Evite invenções.
-        
-        RETORNE APENAS UM JSON COM O OBJETO DESTE DIA.
-        Exemplo para Dieta: {{ "dia": "{dia_alvo}", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "..." }}
-        Exemplo para Treino: {{ 
-            "dia": "{dia_alvo}", 
-            "foco": "...", 
-            "exercicios": [
-               {{ "nome": "...", "series_reps": "...", "execucao": "Instrução técnica exata." }}
-            ], 
-            "treino_alternativo": "...", 
-            "justificativa": "..." 
+        RETORNE APENAS O JSON DO OBJETO DO DIA (SEM LISTA EXTERNA):
+        {{ 
+          "dia": "{dia_alvo}", 
+          "foco": "...", 
+          "exercicios": [
+            {{ "nome": "...", "series_reps": "...", "execucao": "..." }}
+          ], 
+          "treino_alternativo": "...",
+          "justificativa": "..."
         }}
         """
     else:
         # MODO: REFRESH DE SEÇÃO COMPLETA
         prompt_regeneracao = f"""
-        ATENÇÃO: Você é um especialista da TechnoBolt.
-        TAREFA: Reescrever COMPLETAMENTE a seção de '{secao.upper()}' para o atleta {nome}.
-        O usuário pediu um "REFRESH" nesta seção completa.
-        
-        CONTEXTO ATUALIZADO:
-        - Restrições Físicas: {r_f}
-        - Restrições Alimentares: {r_a}
-        - Observações: {obs}
-        
-        REGRAS:
-        1. GERE PARA OS 7 DIAS (Segunda a Domingo) se for Treino/Dieta.
-        2. TREINO: OBRIGATÓRIO incluir o campo "execucao" para CADA exercício detalhando o movimento técnico e equipamento. SEM EMOJIS. Use NOMES PADRÃO de academia.
-        
-        RETORNE APENAS UM JSON VÁLIDO com a chave correspondente à seção. Exemplo: {{ "{secao}": [ ... ] }}
+        ATENÇÃO: Treinador de Elite TechnoBolt.
+        TAREFA: Refresh COMPLETO da seção '{secao.upper()}' para o atleta {nome}.
+        CONTEXTO: {r_f}, {r_a}, {obs}.
+        REGRAS: 7 Dias. Variedade de exercícios (FitSW Compliant). Campo "execucao" detalhado.
+        RETORNE JSON: {{ "{secao}": [ ... ] }}
         """
 
-    # Roda a IA
     resultado_texto = rodar_ia(prompt_regeneracao)
-    
-    if not resultado_texto:
-        return {"sucesso": False, "mensagem": "Erro na IA ao regenerar."}
+    if not resultado_texto: return {"sucesso": False, "mensagem": "Erro IA."}
 
     novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
@@ -736,9 +507,16 @@ def regenerar_secao(dados: dict):
             for dia in novo_dado_ia['treino']:
                 injetar_url_lista(dia.get('exercicios', []))
         elif dia_alvo:
-            obj_dia = novo_dado_ia.get('treino', novo_dado_ia)
-            if isinstance(obj_dia, list) and len(obj_dia) > 0: obj_dia = obj_dia[0]
+            # Normaliza onde está o objeto do dia (as vezes a IA aninha, as vezes manda flat)
+            if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
+                obj_dia = novo_dado_ia['treino'][0]
+            else:
+                obj_dia = novo_dado_ia
+            
             injetar_url_lista(obj_dia.get('exercicios', []))
+            
+            # Garante que 'novo_dado_ia' seja o objeto do dia para a lógica de update abaixo funcionar
+            novo_dado_ia = obj_dia
 
     # --- LÓGICA DE ATUALIZAÇÃO NO BANCO ---
     updates = {}
@@ -754,16 +532,11 @@ def regenerar_secao(dados: dict):
                 idx_alvo = i
                 break
         
-        # O objeto retornado pela IA para um dia único geralmente não vem encapsulado na chave da seção
-        # Mas as vezes a IA coloca. Vamos normalizar.
-        objeto_dia = novo_dado_ia.get(secao, novo_dado_ia) # Tenta pegar dentro da chave, se não, é o próprio dict
-        if isinstance(objeto_dia, list): objeto_dia = objeto_dia[0] # Se veio lista de 1 item
-
         if idx_alvo != -1:
             # Substitui no índice específico
-            updates[f"historico_dossies.-1.conteudo_bruto.json_full.{secao}.{idx_alvo}"] = objeto_dia
+            updates[f"historico_dossies.-1.conteudo_bruto.json_full.{secao}.{idx_alvo}"] = novo_dado_ia
         else:
-            # Se não achou o dia, ignora
+            # Se não achou o dia, ignora (ou poderia adicionar)
             pass
             
     else:
@@ -779,16 +552,11 @@ def regenerar_secao(dados: dict):
              if key_insight in novo_dado_ia:
                  updates[caminho_insight] = novo_dado_ia[key_insight]
 
-    # Aplica as atualizações e cobra o crédito
     if updates:
-        # Prepara o comando de update ($set para dados, $inc para créditos)
         mongo_cmd = {"$set": updates}
-        if not is_admin:
-            mongo_cmd["$inc"] = {"avaliacoes_restantes": -1}
-            
+        if not is_admin: mongo_cmd["$inc"] = {"avaliacoes_restantes": -1}
         db.usuarios.update_one({"usuario": usuario}, mongo_cmd)
         
-        # Retorna o dossiê completo atualizado e o novo saldo
         user_atualizado = db.usuarios.find_one({"usuario": usuario})
         return {
             "sucesso": True, 
@@ -796,7 +564,7 @@ def regenerar_secao(dados: dict):
             "novo_saldo": user_atualizado.get('avaliacoes_restantes', 0)
         }
     
-    return {"sucesso": False, "mensagem": "Falha ao processar estrutura da resposta da IA."}
+    return {"sucesso": False, "mensagem": "Estrutura inválida."}
 
 @app.get("/historico/{usuario}")
 def buscar_historico(usuario: str):
