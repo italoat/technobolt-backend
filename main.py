@@ -20,7 +20,7 @@ import difflib # [NOVO] Para Fuzzy Matching dos exercícios
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="81.0-Elite-External-DB")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="84.0-Elite-Assets-Fixed")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
 EXERCISE_DB = {}
@@ -29,7 +29,7 @@ try:
         EXERCISE_DB = json.load(f)
     print(f"✅ Banco de Exercícios Carregado: {len(EXERCISE_DB)} itens.")
 except Exception as e:
-    print(f"⚠️ AVISO: Não foi possível carregar exercises.json. Usando fallback. Erro: {e}")
+    print(f"⚠️ AVISO: Não foi possível carregar exercises.json. Usando fallback vazio. Erro: {e}")
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
@@ -103,44 +103,51 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     except Exception:
         return file_bytes
 
-# --- [AJUSTE] GERADOR DE LINK COM FUZZY MATCHING PARA GIF DIRETO ---
-def gerar_link_fitsw(nome_exercicio):
-    if not nome_exercicio: return ""
+# --- [AJUSTE CIRÚRGICO] GERADOR DE IMAGENS (DUPLA: 0.jpg e 1.jpg) ---
+def gerar_imagens_exercicio(nome_exercicio):
+    """
+    Retorna uma LISTA com as URLs das imagens 0.jpg e 1.jpg do SEU repositório.
+    Consulta o arquivo exercises.json para obter o nome da pasta correto.
+    """
+    if not nome_exercicio: return []
     
-    # 1. Normalização (Minúsculas e sem acentos)
+    # 1. Normalização (Minúsculas e sem acentos para busca)
     nome_norm = "".join(c for c in unicodedata.normalize('NFD', nome_exercicio) if unicodedata.category(c) != 'Mn').lower().strip()
     
-    slug = None
+    folder_name = None
     
-    # 2. Busca Exata no JSON Carregado
+    # 2. Busca Exata no JSON Carregado (EXERCISE_DB)
     if nome_norm in EXERCISE_DB:
-        slug = EXERCISE_DB[nome_norm]
-    
-    # 3. Busca Aproximada (Fuzzy Match)
+        folder_name = EXERCISE_DB[nome_norm]
     else:
-        # cutoff=0.6 significa 60% de similaridade mínima.
+        # 3. Fuzzy Match (Busca Aproximada - 60% de similaridade)
+        # Útil se a IA escrever "Supino Reto Barra" e no banco estiver "supino reto com barra"
         matches = difflib.get_close_matches(nome_norm, EXERCISE_DB.keys(), n=1, cutoff=0.6)
         if matches:
-            melhor_match = matches[0]
-            slug = EXERCISE_DB[melhor_match]
+            folder_name = EXERCISE_DB[matches[0]]
+            
+    # Base URL do SEU repositório (GitHub Raw) onde a pasta 'assets/exercises' está.
+    # Ajuste o branch ('main' ou 'master') se necessário.
+    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
     
-    # 4. Construção da URL do GIF
-    if slug:
-        # O slug no JSON geralmente está em snake_case (ex: barbell_bench_press)
-        # O padrão de GIF do FitSW usa PascalCase com Underscores (ex: Barbell_Bench_Press)
-        # Transformamos cada parte para Capitalize
-        slug_formatado = "_".join([part.capitalize() for part in slug.split('_')])
-        
-        # URL Final do GIF
-        return f"https://cdn.fitsw.com/assets/img/exerciseGifs/{slug_formatado}_Demo_How-to.gif"
+    if folder_name:
+        # Retorna as duas imagens para o frontend empilhar
+        return [
+            f"{base_url}/{folder_name}/0.jpg",
+            f"{base_url}/{folder_name}/1.jpg"
+        ]
 
-    # 5. Fallback: Formatação Simples (Se não achou nada no JSON, tenta a sorte formatando o nome)
-    # Remove caracteres especiais
-    nome_limpo = re.sub(r'[^a-zA-Z0-9\s]', '', unicodedata.normalize('NFD', nome_exercicio).encode('ascii', 'ignore').decode('utf-8'))
-    # Formata para PascalCase com Underscore
-    slug_fallback = "_".join([part.capitalize() for part in nome_limpo.split()])
-    
-    return f"https://cdn.fitsw.com/assets/img/exerciseGifs/{slug_fallback}_Demo_How-to.gif"
+    # Fallback: Se não achou no JSON, tenta formatar o nome da IA para PascalCase (padrão das pastas)
+    # Ex: "rosca direta" -> "Rosca_Direta"
+    try:
+        nome_limpo = re.sub(r'[^a-zA-Z0-9\s]', '', unicodedata.normalize('NFD', nome_exercicio).encode('ascii', 'ignore').decode('utf-8'))
+        folder_fallback = "_".join([part.capitalize() for part in nome_limpo.split()])
+        return [
+            f"{base_url}/{folder_fallback}/0.jpg",
+            f"{base_url}/{folder_fallback}/1.jpg"
+        ]
+    except:
+        return []
 
 # --- PDF GENERATOR ---
 
@@ -350,7 +357,7 @@ async def executar_analise(
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [PROMPT MESTRE - ALTA PERFORMANCE & FITSW VALIDATED]
+    # [PROMPT MESTRE - ALTA PERFORMANCE & ASSETS VALIDATED]
     prompt_mestre = f"""
     VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica). 
     SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O OBJETIVO DO ALUNO, MAXIMIZANDO RESULTADOS.
@@ -366,11 +373,11 @@ async def executar_analise(
     - Obs: {info}
 
     ===================================================================================
-    REGRAS DE OURO PARA O TREINO (COMPATIBILIDADE FITSW):
+    REGRAS DE OURO PARA O TREINO (COMPATIBILIDADE ASSETS):
     1. USE O MÁXIMO DE VARIEDADE DA BIBLIOTECA (Não fique só no básico).
        - Use: Cabos (Crossover, Polia), Halteres, Máquinas Articuladas, Smith, Peso do Corpo, Kettlebell.
-       - NADA DE NOMES INVENTADOS. Use nomes clássicos em PT-BR que existem no dicionário FitSW.
-         Tente usar os nomes que constam na base de dados (Ex: Supino Reto com Barra, Crossover, Puxada Alta).
+       - NADA DE NOMES INVENTADOS. Use nomes clássicos em PT-BR que correspondam às chaves do seu arquivo JSON de exercícios.
+         Ex: "Supino Inclinado com Halteres", "Crucifixo Inclinado", "Puxada Frente", "Remada Cavalinho", "Agachamento Búlgaro", "Stiff", "Rosca Scott", "Tríceps Testa", "Abdominal Infra".
     
     2. ESTRUTURA SEMANAL (7 DIAS):
        - Crie uma divisão inteligente (Ex: ABC, ABCD, Push/Pull/Legs).
@@ -416,11 +423,12 @@ async def executar_analise(
 
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
+    # [AJUSTE] Injeta a lista de imagens para o Frontend (0.jpg e 1.jpg)
     if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
         for dia in conteudo_json['treino']:
             if 'exercicios' in dia and isinstance(dia['exercicios'], list):
                 for ex in dia['exercicios']:
-                    ex['url_execucao'] = gerar_link_fitsw(ex.get('nome', ''))
+                    ex['imagens_demonstracao'] = gerar_imagens_exercicio(ex.get('nome', ''))
 
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -470,7 +478,7 @@ def regenerar_secao(dados: dict):
     nome = user_data.get('nome', '')
     
     if dia_alvo and secao in ["dieta", "treino"]:
-        # --- REFRESH DE DIA ÚNICO (RETORNA APENAS O OBJETO DO DIA) ---
+        # --- REFRESH DE DIA ÚNICO ---
         prompt_regeneracao = f"""
         ATENÇÃO: Treinador de Elite TechnoBolt.
         TAREFA: Reescrever APENAS o dia '{dia_alvo}' da seção '{secao.upper()}' para o atleta {nome}.
@@ -478,7 +486,7 @@ def regenerar_secao(dados: dict):
         CONTEXTO: Restrições: {r_f} (Físicas), {r_a} (Alimentares). Obs: {obs}.
         
         REGRA CRÍTICA PARA TREINO: 
-        1. Use exercícios da biblioteca FitSW (Variedade: Cabos, Halteres, Máquinas).
+        1. Use exercícios validados pelo banco (Variedade: Cabos, Halteres, Máquinas).
         2. MANTENHA A ESTRUTURA DE OBJETO ÚNICO DO DIA.
         3. Campo "execucao" OBRIGATÓRIO e DETALHADO. SEM EMOJIS.
         
@@ -499,7 +507,7 @@ def regenerar_secao(dados: dict):
         ATENÇÃO: Treinador de Elite TechnoBolt.
         TAREFA: Refresh COMPLETO da seção '{secao.upper()}' para o atleta {nome}.
         CONTEXTO: {r_f}, {r_a}, {obs}.
-        REGRAS: 7 Dias. Variedade de exercícios (FitSW Compliant). Campo "execucao" detalhado.
+        REGRAS: 7 Dias. Variedade de exercícios (Assets Compliant). Campo "execucao" detalhado.
         RETORNE JSON: {{ "{secao}": [ ... ] }}
         """
 
@@ -508,19 +516,16 @@ def regenerar_secao(dados: dict):
 
     novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
-    # [AJUSTE CIRÚRGICO] Enriquecimento de URLs também na regeneração
+    # [AJUSTE] Injeção de URLs de Imagens na Regeneração
     if secao == "treino":
         def injetar_url_lista(lista_ex):
             if isinstance(lista_ex, list):
                 for ex in lista_ex:
-                    ex['url_execucao'] = gerar_link_fitsw(ex.get('nome', ''))
+                    ex['imagens_demonstracao'] = gerar_imagens_exercicio(ex.get('nome', ''))
 
-        # Cenário 1: Regeneração de Seção Completa (Lista de Dias)
         if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
             for dia in novo_dado_ia['treino']:
                 injetar_url_lista(dia.get('exercicios', []))
-        
-        # Cenário 2: Regeneração de Dia Único (Objeto Solto ou dentro de 'treino')
         elif dia_alvo:
             # Normaliza onde está o objeto do dia (as vezes a IA aninha, as vezes manda flat)
             if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
@@ -627,40 +632,24 @@ def deletar_post_social(dados: dict):
     try:
         post_id = dados.get("post_id")
         usuario = dados.get("usuario")
-        
-        if not post_id or not usuario:
-            return {"sucesso": False, "mensagem": "Dados incompletos"}
-
-        try:
-            oid = ObjectId(post_id)
-        except Exception:
-            return {"sucesso": False, "mensagem": "ID de post inválido"}
-
+        if not post_id or not usuario: return {"sucesso": False, "mensagem": "Dados incompletos"}
+        try: oid = ObjectId(post_id)
+        except: return {"sucesso": False, "mensagem": "ID inválido"}
         result = db.posts.delete_one({"_id": oid, "autor": usuario})
-
-        if result.deleted_count > 0:
-            return {"sucesso": True, "mensagem": "Post deletado"}
-        else:
-            return {"sucesso": False, "mensagem": "Post não encontrado ou sem permissão."}
-            
-    except Exception as e:
-        print(f"Erro delete: {e}")
-        return {"sucesso": False, "mensagem": f"Erro interno: {str(e)}"}
+        return {"sucesso": True} if result.deleted_count > 0 else {"sucesso": False}
+    except Exception as e: return {"sucesso": False, "mensagem": str(e)}
         
 @app.post("/social/curtir")
 def curtir_post(dados: dict):
     try:
         post_id = dados.get("post_id")
         usuario = dados.get("usuario")
-        
         post = db.posts.find_one({"_id": ObjectId(post_id)})
         if not post: return {"sucesso": False, "mensagem": "Post não encontrado"}
-            
         if usuario in post.get("likes", []):
             db.posts.update_one({"_id": ObjectId(post_id)}, {"$pull": {"likes": usuario}})
         else:
             db.posts.update_one({"_id": ObjectId(post_id)}, {"$addToSet": {"likes": usuario}})
-            
         return {"sucesso": True}
     except Exception as e:
         raise HTTPException(500, f"Erro ao processar like: {str(e)}")
@@ -684,39 +673,20 @@ def postar_comentario(dados: dict):
 def criar_desafio(dados: dict):
     prompt_validacao = f"Analise se este desafio é relacionado a saúde/fitness: '{dados['titulo']} - {dados.get('descricao')}'. Responda APENAS 'SIM' ou 'NAO'."
     res = rodar_ia(prompt_validacao)
-    
-    if not res or "SIM" not in res.upper():
-        return {"sucesso": False, "mensagem": "A IA detectou que este desafio não é focado em saúde."}
-
-    novo_desafio = {
-        **dados, 
-        "criador": dados['usuario'], 
-        "participantes": [dados['usuario']], 
-        "ranking": {dados['usuario']: 0}, 
-        "status": "ativo"
-    }
+    if not res or "SIM" not in res.upper(): return {"sucesso": False, "mensagem": "A IA detectou que este desafio não é focado em saúde."}
+    novo_desafio = {**dados, "criador": dados['usuario'], "participantes": [dados['usuario']], "ranking": {dados['usuario']: 0}, "status": "ativo"}
     db.desafios.insert_one(novo_desafio)
     return {"sucesso": True}
 
 @app.get("/social/desafios")
 def listar_desafios_disponiveis(usuario: str):
     desafios = list(db.desafios.find({"participantes": {"$ne": usuario}}).sort("_id", -1))
-    for d in desafios: 
-        d['_id'] = str(d['_id'])
+    for d in desafios: d['_id'] = str(d['_id'])
     return {"sucesso": True, "desafios": desafios}
 
 @app.post("/social/desafio/participar")
 def participar_desafio(dados: dict):
-    usuario = dados.get("usuario")
-    id_desafio = dados.get("id_desafio")
-    
-    db.desafios.update_one(
-        {"_id": ObjectId(id_desafio)},
-        {
-            "$addToSet": {"participantes": usuario},
-            "$set": {f"ranking.{usuario}": 0}
-        }
-    )
+    db.desafios.update_one({"_id": ObjectId(dados.get("id_desafio"))}, {"$addToSet": {"participantes": dados.get("usuario")}, "$set": {f"ranking.{dados.get('usuario')}": 0}})
     return {"sucesso": True}
 
 @app.get("/social/meus-desafios")
@@ -725,44 +695,23 @@ def listar_meus_desafios(usuario: str):
     for d in desafios:
         d['_id'] = str(d['_id'])
         if 'ranking' not in d: d['ranking'] = {usuario: 0}
-        
-        campo_progresso = f"progresso_{usuario}"
-        d['dias_concluidos_atleta'] = d.get(campo_progresso, [])
-    
+        d['dias_concluidos_atleta'] = d.get(f"progresso_{usuario}", [])
     return {"sucesso": True, "meus_desafios": desafios}
 
 @app.post("/social/desafio/validar-ia")
 async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...), foto_prova: UploadFile = File(...)):
     content = await foto_prova.read()
     img = otimizar_imagem(content)
-    
     prompt = "Aja como juiz fitness. Na imagem, o usuario esta treinando ou comendo saudavel? Responda 'SIM' ou 'NAO'. Se NAO, curto motivo."
     res = rodar_ia(prompt, img)
-    
     aprovado = res and "SIM" in res.upper()
     pontos = 10 if aprovado else 0
-    motivo = res if not aprovado else "Desafio validado com sucesso!"
+    motivo = res if not aprovado else "Desafio validado!"
 
     if aprovado:
-        campo_progresso = f"progresso_{usuario}"
-        db.desafios.update_one(
-            {"_id": ObjectId(id_desafio)},
-            {
-                "$inc": {f"ranking.{usuario}": pontos},
-                "$addToSet": {campo_progresso: datetime.now().day} 
-            }
-        )
-        
+        db.desafios.update_one({"_id": ObjectId(id_desafio)}, {"$inc": {f"ranking.{usuario}": pontos}, "$addToSet": {f"progresso_{usuario}": datetime.now().day}})
         img_b64 = base64.b64encode(img).decode('utf-8')
-        db.posts.insert_one({
-            "autor": usuario,
-            "legenda": f"🔥 Validou o dia no desafio! (+{pontos} pts)",
-            "imagem": img_b64,
-            "data": datetime.now().isoformat(),
-            "tipo": "prova_desafio",
-            "likes": [],
-            "comentarios": [{"autor": "TechnoBolt 🤖", "texto": "Excelente forma! Continue assim."}]
-        })
+        db.posts.insert_one({"autor": usuario, "legenda": f"🔥 Validou o dia no desafio! (+{pontos} pts)", "imagem": img_b64, "data": datetime.now().isoformat(), "tipo": "prova_desafio", "likes": [], "comentarios": [{"autor": "TechnoBolt 🤖", "texto": "Excelente forma! Continue assim."}]})
 
     return {"sucesso": True, "aprovado": aprovado, "pontos": pontos, "motivo": motivo}
 
@@ -770,19 +719,8 @@ async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...),
 
 @app.get("/setup/criar-admin")
 def criar_admin_inicial():
-    if db.usuarios.find_one({"usuario": "admin"}):
-        return {"sucesso": False, "mensagem": "Admin já existe!"}
-    
-    db.usuarios.insert_one({
-        "usuario": "admin",
-        "senha": "123",
-        "nome": "Super Admin",
-        "is_admin": True,
-        "status": "ativo",
-        "avaliacoes_restantes": 9999,
-        "historico_dossies": [],
-        "peso": 80.0, "altura": 180, "genero": "Masculino"
-    })
+    if db.usuarios.find_one({"usuario": "admin"}): return {"sucesso": False, "mensagem": "Admin já existe!"}
+    db.usuarios.insert_one({"usuario": "admin", "senha": "123", "nome": "Super Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999, "historico_dossies": [], "peso": 80.0, "altura": 180, "genero": "Masculino"})
     return {"sucesso": True, "mensagem": "Admin criado"}
 
 @app.get("/admin/listar")
@@ -801,264 +739,104 @@ def excluir_usuario(dados: dict):
     db.usuarios.delete_one({"usuario": dados['target_user']})
     return {"sucesso": True}
 
-# --- ENDPOINT: BAIXAR PDF (VERSÃO FINAL COM DARK MODE E JSON) ---
+# --- ENDPOINT: BAIXAR PDF ---
 
 @app.get("/analise/baixar-pdf/{usuario}")
 def baixar_pdf_completo(usuario: str):
     try:
         user = db.usuarios.find_one({"usuario": usuario})
-        if not user or not user.get('historico_dossies'):
-            raise HTTPException(404, "Nenhum relatório encontrado.")
-
+        if not user or not user.get('historico_dossies'): raise HTTPException(404, "Sem relatório.")
         dossie = user['historico_dossies'][-1]
         raw = dossie.get('conteudo_bruto', {})
         json_data = raw.get('json_full', {}) if isinstance(raw.get('json_full'), dict) else {}
 
         pdf = ModernPDF()
         pdf.add_page()
-
-        # --- CAPA DO RELATÓRIO ---
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(255, 255, 255)
         pdf.cell(0, 10, sanitizar_texto(f"ATLETA: {user.get('nome', 'N/A').upper()}"), ln=True)
         pdf.set_font("Helvetica", "", 10)
         pdf.set_text_color(180, 180, 180)
-        pdf.cell(0, 5, f"DATA DA ANALISE: {dossie.get('data', 'N/A')}", ln=True)
+        pdf.cell(0, 5, f"DATA: {dossie.get('data', 'N/A')}", ln=True)
         pdf.cell(0, 5, f"OBJETIVO: {sanitizar_texto(json_data.get('avaliacao', {}).get('insight', 'Alta Performance')[:50])}...", ln=True)
         pdf.ln(10)
 
-        # --- 1. AVALIAÇÃO (EXPANDIDA) ---
         pdf.draw_section_title("1. ANALISE CORPORAL COMPLETA", icon="O")
         av = json_data.get('avaliacao', {})
         seg = av.get('segmentacao', {})
         dob = av.get('dobras', {})
-        
-        pdf.draw_card_text("Segmentacao Muscular:", 
-                           f"- Tronco: {seg.get('tronco','')}\n- Superior: {seg.get('superior','')}\n- Inferior: {seg.get('inferior','')}")
+        pdf.draw_card_text("Segmentacao:", f"- Tronco: {seg.get('tronco','')}\n- Sup: {seg.get('superior','')}\n- Inf: {seg.get('inferior','')}")
         pdf.ln(2)
-        
-        # Nova Linha para Postura e Simetria
-        pdf.set_fill_color(35, 35, 40)
-        pdf.set_text_color(0, 255, 200) # Ciano
-        pdf.set_font("Helvetica", "B", 10)
-        pdf.cell(90, 8, "Analise Postural", 0, 0, 'L', True)
-        pdf.cell(5, 8, "", 0, 0) # Espaço
-        pdf.cell(90, 8, "Simetria", 0, 1, 'L', True)
-        
-        pdf.set_text_color(230, 230, 230)
-        pdf.set_font("Helvetica", "", 9)
-        postura = sanitizar_texto(av.get('analise_postural', 'N/A')[:200])
-        simetria = sanitizar_texto(av.get('simetria', 'N/A')[:200])
-        
-        # Bloco Postura
-        x_atual = pdf.get_x()
-        y_atual = pdf.get_y()
-        pdf.multi_cell(90, 5, postura, fill=True)
-        y_fim_1 = pdf.get_y()
-        
-        # Bloco Simetria
-        pdf.set_xy(x_atual + 95, y_atual)
-        pdf.multi_cell(90, 5, simetria, fill=True)
-        y_fim_2 = pdf.get_y()
-        
-        pdf.set_y(max(y_fim_1, y_fim_2) + 3)
-
-        pdf.draw_card_text("Estimativa de Dobras:", 
-                           f"- Abd: {dob.get('abdominal','')}\n- Supra: {dob.get('suprailiaca','')}\n- Peit: {dob.get('peitoral','')}")
-        
+        pdf.draw_card_text("Dobras:", f"- Abd: {dob.get('abdominal','')}\n- Supra: {dob.get('suprailiaca','')}\n- Peit: {dob.get('peitoral','')}")
         pdf.ln(2)
         pdf.set_text_color(0, 255, 200)
         pdf.set_font("Helvetica", "B", 10)
-        pdf.multi_cell(0, 6, sanitizar_texto(f">> INSIGHT TECNICO: {av.get('insight', '')}"))
+        pdf.multi_cell(0, 6, sanitizar_texto(f">> INSIGHT: {av.get('insight', '')}"))
 
-        # --- 2. DIETA (DETALHADA EM CARDS) ---
         pdf.add_page()
         pdf.draw_section_title("2. PROTOCOLO NUTRICIONAL", icon="U")
-        
         dieta = json_data.get('dieta', [])
         if isinstance(dieta, list):
             for dia in dieta:
                 pdf.ln(3)
-                # Cabeçalho do Dia
                 pdf.set_fill_color(50, 50, 60)
-                pdf.set_text_color(16, 185, 129) # Verde
+                pdf.set_text_color(16, 185, 129)
                 pdf.set_font("Helvetica", "B", 10)
-                
-                header_text = sanitizar_texto(f"{dia.get('dia', '').upper()} | FOCO: {dia.get('foco_nutricional', '').upper()}")
-                pdf.cell(0, 8, header_text, 0, 1, 'L', True)
-                
-                # Lista de Refeições
-                refeicoes = dia.get('refeicoes', [])
+                pdf.cell(0, 8, sanitizar_texto(f"{dia.get('dia', '').upper()} | {dia.get('foco_nutricional', '').upper()}"), 0, 1, 'L', True)
                 pdf.set_fill_color(35, 35, 40)
                 pdf.set_text_color(230, 230, 230)
-                
-                if isinstance(refeicoes, list):
-                    for ref in refeicoes:
-                        hora = sanitizar_texto(ref.get('horario', ''))
-                        nome = sanitizar_texto(ref.get('nome', ''))
-                        alim = sanitizar_texto(ref.get('alimentos', ''))
-                        
-                        pdf.set_font("Helvetica", "B", 9)
-                        pdf.cell(30, 6, f"{hora} - {nome}:", 0, 0, 'L', True)
-                        pdf.set_font("Helvetica", "", 9)
-                        pdf.multi_cell(0, 6, alim, fill=True)
-                
-                # Footer de Macros
+                for ref in dia.get('refeicoes', []):
+                    pdf.set_font("Helvetica", "B", 9)
+                    pdf.cell(30, 6, f"{sanitizar_texto(ref.get('horario',''))}:", 0, 0, 'L', True)
+                    pdf.set_font("Helvetica", "", 9)
+                    pdf.multi_cell(0, 6, sanitizar_texto(ref.get('alimentos','')), fill=True)
                 pdf.set_font("Helvetica", "I", 8)
                 pdf.set_text_color(150, 150, 150)
                 pdf.cell(0, 6, sanitizar_texto(f"Macros: {dia.get('macros_totais', '')}"), 0, 1, 'R', True)
-                
-                # Linha divisória
                 pdf.set_draw_color(30, 30, 30)
                 pdf.line(10, pdf.get_y()+2, 200, pdf.get_y()+2)
                 pdf.ln(2)
 
-        pdf.ln(5)
-        pdf.draw_card_text("Estrategia Geral:", json_data.get('dieta_insight', ''))
-
-        # --- 3. TREINO (DETALHADO E BONITO - AJUSTE CIRÚRGICO) ---
         pdf.add_page()
         pdf.draw_section_title("3. PLANILHA DE TREINO", icon="X")
-        
         treino = json_data.get('treino', [])
         if isinstance(treino, list):
             for item in treino:
                 pdf.ln(3)
-                # Cabeçalho do Dia
                 pdf.set_fill_color(50, 50, 60)
-                pdf.set_text_color(0, 255, 200) # Destaque Ciano
+                pdf.set_text_color(0, 255, 200)
                 pdf.set_font("Helvetica", "B", 10)
-                foco_dia = sanitizar_texto(f"{item.get('dia','').upper()} - FOCO: {item.get('foco','').upper()}")
-                pdf.cell(0, 8, foco_dia, 0, 1, 'L', True)
-
-                # Fundo do corpo do card de treino
+                pdf.cell(0, 8, sanitizar_texto(f"{item.get('dia','').upper()} - {item.get('foco','').upper()}"), 0, 1, 'L', True)
                 pdf.set_fill_color(35, 35, 40)
                 pdf.set_text_color(230, 230, 230)
                 pdf.set_font("Helvetica", "", 9)
-
-                # Lista de Exercícios
-                exercicios = item.get('exercicios', [])
-                if exercicios:
-                    pdf.set_font("Helvetica", "B", 9)
-                    pdf.cell(0, 6, "Exercicios:", 0, 1, 'L', True)
-                    pdf.set_font("Helvetica", "", 9)
-                    for ex in exercicios:
-                        nome_ex = sanitizar_texto(ex.get('nome', ''))
-                        series = sanitizar_texto(ex.get('series_reps', ''))
-                        execucao = sanitizar_texto(ex.get('execucao', ''))
-                        
-                        # Linha do Exercício
-                        linha = f"  > {nome_ex} [{series}]"
-                        pdf.cell(0, 5, linha, 0, 1, 'L', True)
-                        
-                        # [AJUSTE PDF] Exibe a execução técnica logo abaixo
-                        if execucao:
-                            pdf.set_font("Helvetica", "I", 8)
-                            pdf.set_text_color(180, 180, 180)
-                            pdf.multi_cell(0, 4, f"     Orientacao: {execucao}", fill=True)
-                            pdf.set_font("Helvetica", "", 9)
-                            pdf.set_text_color(230, 230, 230)
-                
-                # Alternativo e Justificativa
-                alt = sanitizar_texto(item.get('treino_alternativo', 'N/A'))
-                just = sanitizar_texto(item.get('justificativa', 'N/A'))
-                
+                for ex in item.get('exercicios', []):
+                    nome_ex = sanitizar_texto(ex.get('nome', ''))
+                    series = sanitizar_texto(ex.get('series_reps', ''))
+                    execucao = sanitizar_texto(ex.get('execucao', ''))
+                    pdf.cell(0, 5, f"  > {nome_ex} [{series}]", 0, 1, 'L', True)
+                    if execucao:
+                        pdf.set_font("Helvetica", "I", 8)
+                        pdf.set_text_color(180, 180, 180)
+                        pdf.multi_cell(0, 4, f"     {execucao}", fill=True)
+                        pdf.set_font("Helvetica", "", 9)
+                        pdf.set_text_color(230, 230, 230)
                 pdf.ln(1)
-                pdf.set_font("Helvetica", "I", 8)
-                pdf.set_text_color(150, 150, 150)
-                pdf.multi_cell(0, 5, f"Alternativo: {alt}", fill=True)
-                pdf.multi_cell(0, 5, f"Motivo: {just}", fill=True)
-                
-                # Linha separadora entre dias
                 pdf.set_draw_color(30, 30, 30)
                 pdf.line(10, pdf.get_y()+2, 200, pdf.get_y()+2)
                 pdf.ln(2)
 
-        pdf.ln(5)
-        pdf.draw_card_text("Analise Biomecanica Geral:", json_data.get('treino_insight', ''))
-
-        # --- 4. SUPLEMENTAÇÃO (CARDS VISUAIS) ---
         pdf.add_page()
-        pdf.draw_section_title("4. ARSENAL DE SUPLEMENTOS", icon="+")
-        
+        pdf.draw_section_title("4. SUPLEMENTACAO", icon="+")
         suple = json_data.get('suplementacao', [])
         if isinstance(suple, list):
-            # Layout de 2 colunas para economizar espaço
-            col_width = 90
-            spacing = 5
-            
-            for i in range(0, len(suple), 2):
-                # Pega item par e impar (coluna 1 e 2)
-                item1 = suple[i]
-                item2 = suple[i+1] if i+1 < len(suple) else None
-                
-                # Altura fixa do card
-                card_h = 35
-                
-                # --- COLUNA 1 ---
-                x_start = pdf.get_x()
-                y_start = pdf.get_y()
-                
-                # Card Background
-                pdf.set_fill_color(35, 35, 40)
-                pdf.rect(x_start, y_start, col_width, card_h, 'F')
-                
-                # Conteúdo
-                pdf.set_xy(x_start + 2, y_start + 2)
-                pdf.set_font("Helvetica", "B", 11)
-                pdf.set_text_color(255, 165, 0) # Laranja
-                pdf.cell(col_width-4, 6, sanitizar_texto(item1.get('nome', '')), 0, 1)
-                
-                pdf.set_x(x_start + 2)
-                pdf.set_font("Helvetica", "B", 9)
-                pdf.set_text_color(255, 255, 255)
-                pdf.cell(col_width-4, 5, sanitizar_texto(f"Dose: {item1.get('dose', '')} | {item1.get('horario', '')}"), 0, 1)
-                
-                pdf.set_x(x_start + 2)
-                pdf.set_font("Helvetica", "", 8)
-                pdf.set_text_color(200, 200, 200)
-                pdf.multi_cell(col_width-4, 4, sanitizar_texto(item1.get('motivo', '')))
-                
-                # --- COLUNA 2 (Se existir) ---
-                if item2:
-                    pdf.set_xy(x_start + col_width + spacing, y_start)
-                    
-                    # Card Background
-                    pdf.set_fill_color(35, 35, 40)
-                    pdf.rect(pdf.get_x(), pdf.get_y(), col_width, card_h, 'F')
-                    
-                    # Conteúdo
-                    current_x = pdf.get_x()
-                    pdf.set_xy(current_x + 2, y_start + 2)
-                    pdf.set_font("Helvetica", "B", 11)
-                    pdf.set_text_color(255, 165, 0) 
-                    pdf.cell(col_width-4, 6, sanitizar_texto(item2.get('nome', '')), 0, 1)
-                    
-                    pdf.set_x(current_x + 2)
-                    pdf.set_font("Helvetica", "B", 9)
-                    pdf.set_text_color(255, 255, 255)
-                    pdf.cell(col_width-4, 5, sanitizar_texto(f"Dose: {item2.get('dose', '')} | {item2.get('horario', '')}"), 0, 1)
-                    
-                    pdf.set_x(current_x + 2)
-                    pdf.set_font("Helvetica", "", 8)
-                    pdf.set_text_color(200, 200, 200)
-                    pdf.multi_cell(col_width-4, 4, sanitizar_texto(item2.get('motivo', '')))
+            for item in suple:
+                pdf.draw_card_text(item.get('nome',''), f"Dose: {item.get('dose','')} | {item.get('horario','')}\nMotivo: {item.get('motivo','')}")
 
-                # Move cursor para próxima linha de cards
-                pdf.set_xy(x_start, y_start + card_h + spacing)
-
-        pdf.ln(5)
-        pdf.draw_card_text("Insight Ortomolecular:", json_data.get('suplementacao_insight', ''))
-
-        # Output
         pdf_buffer = io.BytesIO()
         pdf_output = pdf.output(dest='S')
-        
-        if isinstance(pdf_output, str):
-            pdf_buffer.write(pdf_output.encode('latin-1'))
-        else:
-            pdf_buffer.write(pdf_output)
-            
+        if isinstance(pdf_output, str): pdf_buffer.write(pdf_output.encode('latin-1'))
+        else: pdf_buffer.write(pdf_output)
         pdf_buffer.seek(0)
         
         headers = {'Content-Disposition': f'attachment; filename="TechnoBolt_Protocolo.pdf"'}
@@ -1066,21 +844,21 @@ def baixar_pdf_completo(usuario: str):
 
     except Exception as e:
         print(f"ERRO CRÍTICO PDF: {e}")
-        raise HTTPException(500, f"Erro ao gerar PDF: {str(e)}")
+        raise HTTPException(500, f"Erro PDF: {str(e)}")
 
 # --- CHAT ---
 @app.get("/chat/usuarios")
 def listar_usuarios_chat(usuario_atual: str):
-    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
-    return {"sucesso": True, "usuarios": users}
+    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
+    return {"sucesso": True, "usuarios": users}
 
 @app.get("/chat/mensagens")
 def pegar_mensagens(user1: str, user2: str):
-    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
-    for m in msgs: m['_id'] = str(m['_id'])
-    return {"sucesso": True, "mensagens": msgs}
+    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
+    for m in msgs: m['_id'] = str(m['_id'])
+    return {"sucesso": True, "mensagens": msgs}
 
 @app.post("/chat/enviar")
 def enviar_mensagem(dados: dict):
-    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
-    return {"sucesso": True}
+    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
+    return {"sucesso": True}
