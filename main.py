@@ -20,10 +20,9 @@ import difflib
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="88.0-Elite-HighVolume")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="89.0-Elite-Gamification")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
-# Carrega as chaves em memória para validação rápida e blindagem
 EXERCISE_KEYS = []
 EXERCISE_DB = {}
 EXERCISE_LIST_STRING = ""
@@ -31,9 +30,7 @@ EXERCISE_LIST_STRING = ""
 try:
     with open("exercises.json", "r", encoding="utf-8") as f:
         EXERCISE_DB = json.load(f)
-        # Normaliza as chaves para facilitar a busca
         EXERCISE_KEYS = list(EXERCISE_DB.keys())
-        # Cria uma string separada por vírgulas para a IA saber EXATAMENTE o que existe
         EXERCISE_LIST_STRING = ", ".join([k for k in EXERCISE_KEYS])
         
     print(f"✅ Banco de Exercícios Carregado e Indexado: {len(EXERCISE_DB)} itens.")
@@ -42,10 +39,9 @@ except Exception as e:
 
 # --- MOTORES DE IA ---
 MOTORES_TECHNOBOLT = [
-    "models/gemini-3-flash-preview", 
-    "models/gemini-2.5-flash", 
     "models/gemini-2.0-flash", 
-    "models/gemini-flash-latest"
+    "models/gemini-1.5-flash",
+    "models/gemini-1.5-pro"
 ]
 
 # --- CONEXÃO BANCO ---
@@ -119,20 +115,11 @@ def normalizar_texto(texto):
     return "".join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower().strip()
 
 def validar_e_corrigir_exercicios(lista_exercicios):
-    """
-    1. Recebe a lista da IA.
-    2. Garante que o exercício exista no JSON (Match Exato ou Aproximado).
-    3. Se não existir, substitui pelo exercício válido mais próximo ou um fallback seguro.
-    4. Gera as URLs apontando para o SEU repositório.
-    """
     if not lista_exercicios or not EXERCISE_DB: return lista_exercicios
     
-    # URL Base do SEU Repositório
     base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
     
-    # Mapas auxiliares
     db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
-    # Preserva o nome original (case sensitive do JSON keys) para exibição correta
     db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
 
     for ex in lista_exercicios:
@@ -142,24 +129,18 @@ def validar_e_corrigir_exercicios(lista_exercicios):
         pasta_github = None
         nome_final = nome_ia 
 
-        # 1. Match Exato
         if nome_ia_norm in db_map_norm:
             pasta_github = db_map_norm[nome_ia_norm]
-            # Usa o nome exato do JSON para ficar bonito (Capitalizado se necessário)
-            # Como as chaves do JSON estão em minúsculo na maioria, podemos dar um .title()
             nome_final = db_title_map[nome_ia_norm].title()
         else:
-            # 2. Fuzzy Match (Correção de erros de digitação)
             matches = difflib.get_close_matches(nome_ia_norm, db_map_norm.keys(), n=1, cutoff=0.6)
             if matches:
                 match_key = matches[0]
                 pasta_github = db_map_norm[match_key]
                 nome_final = db_title_map[match_key].title()
             else:
-                # 3. Substring Match (Inteligência Semântica)
                 melhor_candidato = None
                 for key in db_map_norm.keys():
-                    # Se o nome do banco está contido no da IA ou vice-versa
                     if (key in nome_ia_norm and len(key) > 4) or (nome_ia_norm in key and len(nome_ia_norm) > 4): 
                         melhor_candidato = key
                         break
@@ -168,17 +149,12 @@ def validar_e_corrigir_exercicios(lista_exercicios):
                     pasta_github = db_map_norm[melhor_candidato]
                     nome_final = db_title_map[melhor_candidato].title()
                 else:
-                    # 4. FALLBACK EXTREMO (Para nunca ficar sem imagem)
-                    # Pega "Jumping_Jacks" (Polichinelo) que é garantido ter no repo
-                    # Tenta achar "polichinelo"
                     fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
                     pasta_github = db_map_norm[fallback_key]
                     nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
 
-        # Aplica as correções
         ex['nome'] = nome_final
         
-        # Garante a URL da imagem (Blindagem)
         if pasta_github:
             ex['imagens_demonstracao'] = [
                 f"{base_url}/{pasta_github}/0.jpg",
@@ -285,25 +261,13 @@ class ModernPDF(FPDF):
 
 def calcular_medalha(username):
     try:
-        desafios = list(db.desafios.find({"participantes": username}))
-        if not desafios: return ""
-        melhor_nivel = 4 
-        for d in desafios:
-            ranking = d.get('ranking', {})
-            if not ranking: continue
-            ordenados = sorted(ranking.items(), key=lambda x: x[1], reverse=True)
-            total_participantes = len(ordenados)
-            if total_participantes == 0: continue
-            try:
-                posicao = [i for i, (u, s) in enumerate(ordenados, 1) if u == username][0]
-                percentual = posicao / total_participantes
-                if percentual <= 0.20: melhor_nivel = min(melhor_nivel, 1)
-                elif percentual <= 0.30: melhor_nivel = min(melhor_nivel, 2)
-                else: melhor_nivel = min(melhor_nivel, 3)
-            except IndexError:
-                continue
-        mapeamento = {1: "🥇", 2: "🥈", 3: "🥉"}
-        return mapeamento.get(melhor_nivel, "")
+        user = db.usuarios.find_one({"usuario": username})
+        if not user: return ""
+        pontos = user.get('pontos', 0)
+        if pontos > 1000: return "🥇"
+        if pontos > 500: return "🥈"
+        if pontos > 100: return "🥉"
+        return ""
     except Exception:
         return ""
 
@@ -315,6 +279,8 @@ def login(dados: dict):
     if not user: raise HTTPException(401, "Credenciais inválidas")
     if user.get("status") != "ativo" and not user.get("is_admin"):
         raise HTTPException(403, "Sua conta está aguardando ativação pelo administrador.")
+    
+    # Garante campos default se não existirem
     return {
         "sucesso": True,
         "dados": {
@@ -325,6 +291,8 @@ def login(dados: dict):
             "altura": user.get('altura'),
             "genero": user.get('genero', 'Masculino'),
             "creditos": user.get('avaliacoes_restantes', 0),
+            "pontos": user.get('pontos', 0),
+            "foto_perfil": user.get('foto_perfil', None),
             "restricoes_alim": user.get('restricoes_alim', ''),
             "restricoes_fis": user.get('restricoes_fis', ''),
             "medicamentos": user.get('medicamentos', ''),
@@ -340,6 +308,7 @@ def registrar(dados: dict):
         **dados,
         "status": "pendente",
         "avaliacoes_restantes": 0,
+        "pontos": 0,
         "historico_dossies": [],
         "is_admin": False
     }
@@ -348,17 +317,25 @@ def registrar(dados: dict):
     
 @app.post("/perfil/atualizar")
 def atualizar_perfil(dados: dict):
+    # Atualiza dados incluindo os novos campos da ProfileTab (foto e genero)
+    update_data = {
+        "nome": dados.get('nome'),
+        "peso": dados.get('peso'),
+        "altura": dados.get('altura'),
+        "genero": dados.get('genero'),
+        "restricoes_alim": dados.get('restricoes_alim'),
+        "restricoes_fis": dados.get('restricoes_fis'),
+        "medicamentos": dados.get('medicamentos'),
+        "info_add": dados.get('info_add'),
+    }
+    
+    # Só atualiza a foto se ela for enviada (evita apagar se vier null por engano)
+    if 'foto_perfil' in dados:
+        update_data['foto_perfil'] = dados.get('foto_perfil')
+
     db.usuarios.update_one(
         {"usuario": dados['usuario']},
-        {"$set": {
-            "nome": dados.get('nome'),
-            "peso": dados.get('peso'),
-            "altura": dados.get('altura'),
-            "restricoes_alim": dados.get('restricoes_alim'),
-            "restricoes_fis": dados.get('restricoes_fis'),
-            "medicamentos": dados.get('medicamentos'),
-            "info_add": dados.get('info_add')
-        }}
+        {"$set": update_data}
     )
     return {"sucesso": True}
 
@@ -375,7 +352,7 @@ async def executar_analise(
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
-    # Atualiza dados básicos e as observações (info_add)
+    # Atualiza dados básicos e as observações (info_add) no ato da análise
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
@@ -391,13 +368,13 @@ async def executar_analise(
     r_a = user_data.get('restricoes_alim', 'Nenhuma')
     r_m = user_data.get('medicamentos', 'Nenhum')
     r_f = user_data.get('restricoes_fis', 'Nenhuma')
-    info = user_data.get('info_add', '') 
+    info = observacoes 
 
     content = await foto.read()
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [PROMPT MESTRE - BLINDADO CONTRA NULL e COM LISTA DE EXERCÍCIOS]
+    # [PROMPT MESTRE]
     prompt_mestre = f"""
     VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica e Nutrição). 
     SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O ALUNO, MAXIMIZANDO RESULTADOS.
@@ -648,7 +625,20 @@ def regenerar_secao(dados: dict):
 def buscar_historico(usuario: str):
     user = db.usuarios.find_one({"usuario": usuario})
     if not user: return {"sucesso": True, "historico": []}
-    return {"sucesso": True, "historico": user.get('historico_dossies', [])}
+    
+    # Retorna também o perfil atual para sincronização rápida do frontend
+    perfil = {
+        "peso": user.get('peso'),
+        "altura": user.get('altura'),
+        "genero": user.get('genero', 'Masculino'),
+        "restricoes_alim": user.get('restricoes_alim', ''),
+        "restricoes_fis": user.get('restricoes_fis', ''),
+        "medicamentos": user.get('medicamentos', ''),
+        "info_add": user.get('info_add', ''),
+        "creditos": user.get('avaliacoes_restantes', 0)
+    }
+    
+    return {"sucesso": True, "historico": user.get('historico_dossies', []), "creditos": user.get('avaliacoes_restantes', 0), "perfil": perfil}
 
 # --- ENDPOINTS: SOCIAL E DESAFIOS ---
 
@@ -723,51 +713,99 @@ def postar_comentario(dados: dict):
     except Exception as e:
         raise HTTPException(500, f"Erro ao postar comentário: {str(e)}")
 
-@app.post("/social/desafio/criar")
-def criar_desafio(dados: dict):
-    prompt_validacao = f"Analise se este desafio é relacionado a saúde/fitness: '{dados['titulo']} - {dados.get('descricao')}'. Responda APENAS 'SIM' ou 'NAO'."
-    res = rodar_ia(prompt_validacao)
-    if not res or "SIM" not in res.upper(): return {"sucesso": False, "mensagem": "Desafio não focado em saúde."}
-    novo_desafio = {**dados, "criador": dados['usuario'], "participantes": [dados['usuario']], "ranking": {dados['usuario']: 0}, "status": "ativo"}
-    db.desafios.insert_one(novo_desafio)
-    return {"sucesso": True}
+# --- ENDPOINTS: CONQUISTA & RANKING (GAMIFICATION) ---
 
-@app.get("/social/desafios")
-def listar_desafios_disponiveis(usuario: str):
-    desafios = list(db.desafios.find({"participantes": {"$ne": usuario}}).sort("_id", -1))
-    for d in desafios: d['_id'] = str(d['_id'])
-    return {"sucesso": True, "desafios": desafios}
+@app.get("/social/ranking")
+def get_ranking_global():
+    # Retorna usuários ordenados por pontos, excluindo Admins para competição justa
+    users = list(db.usuarios.find(
+        {"is_admin": False}, 
+        {"nome": 1, "usuario": 1, "pontos": 1, "foto_perfil": 1, "_id": 0}
+    ).sort("pontos", -1).limit(50))
+    
+    return {"sucesso": True, "ranking": users}
 
-@app.post("/social/desafio/participar")
-def participar_desafio(dados: dict):
-    db.desafios.update_one({"_id": ObjectId(dados.get("id_desafio"))}, {"$addToSet": {"participantes": dados.get("usuario")}, "$set": {f"ranking.{dados.get('usuario')}": 0}})
-    return {"sucesso": True}
+@app.get("/social/checkins")
+def get_checkins(usuario: str):
+    # Busca histórico de checkins do mês atual para o calendário
+    now = datetime.now()
+    # Filtra do dia 1 do mês atual até agora
+    start_date = datetime(now.year, now.month, 1).isoformat()
+    
+    checkins = list(db.checkins.find(
+        {"usuario": usuario, "data": {"$gte": start_date}}
+    ))
+    
+    # Formata para o frontend: {1: 'gym', 2: 'run'}
+    formatted = {}
+    for c in checkins:
+        try:
+            day = datetime.fromisoformat(c['data']).day
+            formatted[day] = c['tipo']
+        except:
+            pass
+            
+    return {"sucesso": True, "checkins": formatted}
 
-@app.get("/social/meus-desafios")
-def listar_meus_desafios(usuario: str):
-    desafios = list(db.desafios.find({"participantes": usuario}))
-    for d in desafios:
-        d['_id'] = str(d['_id'])
-        if 'ranking' not in d: d['ranking'] = {usuario: 0}
-        d['dias_concluidos_atleta'] = d.get(f"progresso_{usuario}", [])
-    return {"sucesso": True, "meus_desafios": desafios}
+@app.post("/social/validar-conquista")
+async def validar_conquista(
+    usuario: str = Form(...),
+    tipo: str = Form(...), 
+    foto: UploadFile = File(...)
+):
+    # 1. Verifica se já fez checkin hoje
+    now = datetime.now()
+    today_start = datetime(now.year, now.month, now.day).isoformat()
+    
+    ja_fez = db.checkins.find_one({
+        "usuario": usuario, 
+        "data": {"$gte": today_start}
+    })
+    
+    if ja_fez:
+        return {"sucesso": False, "mensagem": "Você já treinou hoje! Volte amanhã."}
 
-@app.post("/social/desafio/validar-ia")
-async def validar_desafio(usuario: str = Form(...), id_desafio: str = Form(...), foto_prova: UploadFile = File(...)):
-    content = await foto_prova.read()
-    img = otimizar_imagem(content)
-    prompt = "Aja como juiz fitness. Na imagem, o usuario esta treinando ou comendo saudavel? Responda 'SIM' ou 'NAO'. Se NAO, curto motivo."
-    res = rodar_ia(prompt, img)
-    aprovado = res and "SIM" in res.upper()
-    pontos = 10 if aprovado else 0
-    motivo = res if not aprovado else "Desafio validado!"
-
-    if aprovado:
-        db.desafios.update_one({"_id": ObjectId(id_desafio)}, {"$inc": {f"ranking.{usuario}": pontos}, "$addToSet": {f"progresso_{usuario}": datetime.now().day}})
-        img_b64 = base64.b64encode(img).decode('utf-8')
-        db.posts.insert_one({"autor": usuario, "legenda": f"🔥 Validou o dia no desafio! (+{pontos} pts)", "imagem": img_b64, "data": datetime.now().isoformat(), "tipo": "prova_desafio", "likes": [], "comentarios": [{"autor": "TechnoBolt 🤖", "texto": "Excelente forma! Continue assim."}]})
-
-    return {"sucesso": True, "aprovado": aprovado, "pontos": pontos, "motivo": motivo}
+    # 2. Processa Imagem
+    content = await foto.read()
+    img_otimizada = otimizar_imagem(content, size=(800, 800))
+    
+    # 3. Prompt de Validação IA (Gamemaster)
+    prompt_juiz = f"""
+    ATUE COMO UM JUIZ RIGOROSO DE FITNESS.
+    O usuário diz que fez um treino do tipo: '{tipo}' (gym=academia, home=casa, run=corrida).
+    
+    Analise a imagem anexada.
+    - Se for 'gym', procure equipamentos de academia, espelhos, pesos, roupas de treino.
+    - Se for 'home', procure tapete de yoga, pesos livres, roupa de ginástica em ambiente doméstico.
+    - Se for 'run', procure ambiente externo (rua/parque), esteira, tênis de corrida, suor.
+    
+    IMPORTANTE: Selfies no espelho VALEM se o contexto bater.
+    
+    Responda APENAS: "APROVADO" ou "REPROVADO".
+    """
+    
+    resultado_ia = rodar_ia(prompt_juiz, img_otimizada)
+    
+    if resultado_ia and "APROVADO" in resultado_ia.upper():
+        pontos_ganhos = 50
+        
+        # Registra o Check-in
+        db.checkins.insert_one({
+            "usuario": usuario,
+            "tipo": tipo,
+            "data": datetime.now().isoformat(),
+            "pontos": pontos_ganhos
+        })
+        
+        # Atualiza Pontuação Global do Usuário
+        db.usuarios.update_one(
+            {"usuario": usuario},
+            {"$inc": {"pontos": pontos_ganhos}}
+        )
+        
+        return {"sucesso": True, "aprovado": True, "pontos": pontos_ganhos}
+    else:
+        return {"sucesso": True, "aprovado": False, "mensagem": "A IA não identificou evidências claras do treino."}
 
 # --- ENDPOINTS: ADMIN ---
 
