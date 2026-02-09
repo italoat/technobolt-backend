@@ -20,7 +20,7 @@ import difflib
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="89.0-Elite-Gamification")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="89.2-Elite-Bulking")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
 EXERCISE_KEYS = []
@@ -87,7 +87,9 @@ def rodar_ia(prompt, imagem_bytes=None):
 def limpar_e_parsear_json(texto_ia):
     try:
         texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
-        return json.loads(texto_limpo)
+        parsed = json.loads(texto_limpo)
+        # Aplica a sanitização recursiva para evitar erro de tipos no Flutter
+        return sanitizar_json_ia(parsed)
     except Exception as e:
         print(f"Erro ao parsear JSON da IA: {e}")
         return {
@@ -96,6 +98,22 @@ def limpar_e_parsear_json(texto_ia):
             "suplementacao": [],
             "treino": []
         }
+
+# Função crítica para evitar o erro 'double is not subtype of String'
+def sanitizar_json_ia(data):
+    """
+    Percorre o JSON recursivamente e converte números em strings 
+    para campos que o Flutter espera que sejam texto.
+    """
+    if isinstance(data, dict):
+        return {k: sanitizar_json_ia(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [sanitizar_json_ia(v) for v in data]
+    elif isinstance(data, (int, float)):
+        # Se encontrou um número solto onde deveria ser estrutura ou texto, converte pra string
+        return str(data)
+    else:
+        return data
 
 def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     try:
@@ -112,6 +130,8 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
 
 def normalizar_texto(texto):
     if not texto: return ""
+    # Proteção extra: garante que é string antes de normalizar
+    if not isinstance(texto, str): texto = str(texto)
     return "".join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower().strip()
 
 def validar_e_corrigir_exercicios(lista_exercicios):
@@ -127,7 +147,7 @@ def validar_e_corrigir_exercicios(lista_exercicios):
         nome_ia_norm = normalizar_texto(nome_ia)
         
         pasta_github = None
-        nome_final = nome_ia 
+        nome_final = str(nome_ia) # Força string
 
         if nome_ia_norm in db_map_norm:
             pasta_github = db_map_norm[nome_ia_norm]
@@ -280,7 +300,6 @@ def login(dados: dict):
     if user.get("status") != "ativo" and not user.get("is_admin"):
         raise HTTPException(403, "Sua conta está aguardando ativação pelo administrador.")
     
-    # Garante campos default se não existirem
     return {
         "sucesso": True,
         "dados": {
@@ -317,7 +336,6 @@ def registrar(dados: dict):
     
 @app.post("/perfil/atualizar")
 def atualizar_perfil(dados: dict):
-    # Atualiza dados incluindo os novos campos da ProfileTab (foto e genero)
     update_data = {
         "nome": dados.get('nome'),
         "peso": dados.get('peso'),
@@ -329,7 +347,6 @@ def atualizar_perfil(dados: dict):
         "info_add": dados.get('info_add'),
     }
     
-    # Só atualiza a foto se ela for enviada (evita apagar se vier null por engano)
     if 'foto_perfil' in dados:
         update_data['foto_perfil'] = dados.get('foto_perfil')
 
@@ -352,7 +369,7 @@ async def executar_analise(
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
-    # Atualiza dados básicos e as observações (info_add) no ato da análise
+    # Atualiza dados no banco
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
@@ -374,7 +391,7 @@ async def executar_analise(
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [PROMPT MESTRE]
+    # [PROMPT MESTRE - ATUALIZADO PARA SUPERÁVIT CALÓRICO]
     prompt_mestre = f"""
     VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica e Nutrição). 
     SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O ALUNO, MAXIMIZANDO RESULTADOS.
@@ -394,9 +411,17 @@ async def executar_analise(
        - OBRIGATÓRIO: campo 'execucao' detalhado sem emojis.
 
     2. PROIBIDO RETORNAR NULL ou "Sem dados". Se faltar info, ESTIME com base no IMC e Objetivo.
-    3. AVALIAÇÃO: Gere estimativas realistas de dobras e postura baseadas no perfil.
-    4. DIETA: OBRIGATÓRIO preencher 'macros_totais' (ex: "P: 180g | C: 200g | G: 60g"). 
+    
+    3. **ANÁLISE CORPORAL E BIOMETRIA:**
+       - Na seção 'avaliacao', analise a composição corporal atual considerando que o objetivo requer construção muscular.
+       - Mencione o planejamento de Bulking/Manutenção no 'insight'.
+
+    4. **DIETA (SUPERÁVIT CALÓRICO):**
+       - **CALCULE O GASTO ENERGÉTICO TOTAL (GET)** do aluno.
+       - **OBRIGATÓRIO:** APLIQUE UM **SUPERÁVIT CALÓRICO (BULKING LIMPO)** de aproximadamente **+300 a +500 kcal** sobre o GET para garantir o ganho de massa, a não ser que o objetivo seja explicitamente 'Perda de Peso' ou 'Cutting'.
+       - Preencha 'macros_totais' refletindo esse superávit (Ex: Proteína alta ~2g/kg, Carbo alto para energia).
        - Crie cardápios completos para 7 dias.
+
     5. SUPLEMENTAÇÃO: Se o aluno não tiver restrição médica grave, sugira o básico (Creatina, Whey, Multivitamínico). Preencha dose/horário.
 
     RETORNE APENAS JSON VÁLIDO:
@@ -415,7 +440,7 @@ async def executar_analise(
             "refeicoes": [
                 {{ "horario": "08:00", "nome": "Café", "alimentos": "..." }}
             ],
-            "macros_totais": "P: Xg | C: Yg | G: Zg"
+            "macros_totais": "P: Xg | C: Yg | G: Zg (Superávit Aplicado)"
         }},
         ...
       ],
@@ -450,26 +475,23 @@ async def executar_analise(
 
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
-    # [BLINDAGEM] Validação e Correção Automática dos Exercícios para garantir imagens
     if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
         for dia in conteudo_json['treino']:
-            # Força o título do dia a ser limpo
             if 'dia' in dia:
-                dia['dia'] = dia['dia'].split('-')[0].split(' ')[0].replace(',', '').strip()
+                dia['dia'] = str(dia['dia']).split('-')[0].split(' ')[0].replace(',', '').strip()
 
             if 'exercicios' in dia and isinstance(dia['exercicios'], list):
-                # Aplica a correção de nomes e gera URLs (0.jpg e 1.jpg)
                 dia['exercicios'] = validar_e_corrigir_exercicios(dia['exercicios'])
 
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "peso_reg": peso,
+        "peso_reg": peso, # Mantemos como float aqui, o front deve tratar se for exibir
         "conteudo_bruto": {
             "json_full": conteudo_json,
-            "r1": conteudo_json.get('avaliacao', {}).get('insight', ''),
-            "r2": conteudo_json.get('dieta_insight', ''),
-            "r3": conteudo_json.get('suplementacao_insight', ''),
-            "r4": conteudo_json.get('treino_insight', '')
+            "r1": str(conteudo_json.get('avaliacao', {}).get('insight', '')),
+            "r2": str(conteudo_json.get('dieta_insight', '')),
+            "r3": str(conteudo_json.get('suplementacao_insight', '')),
+            "r4": str(conteudo_json.get('treino_insight', ''))
         }
     }
     
@@ -537,7 +559,10 @@ def regenerar_secao(dados: dict):
             ATENÇÃO: Nutricionista de Elite TechnoBolt.
             TAREFA: Reescrever a DIETA de '{dia_alvo}' para {nome}.
             CONTEXTO: {r_a}.
-            REGRAS: NÃO retorne campos nulos. Preencha 'macros_totais'.
+            REGRAS: 
+            1. NÃO retorne campos nulos. 
+            2. MANTENHA O SUPERÁVIT CALÓRICO calculado anteriormente (Bulking), exceto se solicitado o contrário.
+            3. Preencha 'macros_totais'.
             
             RETORNE APENAS O JSON DO DIA:
             {{ "dia": "{dia_alvo}", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "P: Xg | C: Yg | G: Zg" }}
@@ -556,7 +581,7 @@ def regenerar_secao(dados: dict):
         - VOLUME DE TREINO: 6 a 9 exercícios por dia.
         - Sem dados nulos. 
         - Títulos dos dias apenas o nome da semana.
-        - Se for dieta, inclua 'macros_totais'.
+        - Se for dieta, inclua 'macros_totais' com SUPERÁVIT CALÓRICO para ganho de massa.
         - Se for suplementacao, inclua dose e horario.
         RETORNE JSON: {{ "{secao}": [ ... ] }}
         """
@@ -566,14 +591,12 @@ def regenerar_secao(dados: dict):
 
     novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
-    # [BLINDAGEM] Aplica correção de exercícios se for treino
     if secao == "treino":
         if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
             for dia in novo_dado_ia['treino']:
-                 if 'dia' in dia: dia['dia'] = dia['dia'].split('-')[0].split(' ')[0].replace(',', '').strip()
+                 if 'dia' in dia: dia['dia'] = str(dia['dia']).split('-')[0].split(' ')[0].replace(',', '').strip()
                  if 'exercicios' in dia: dia['exercicios'] = validar_e_corrigir_exercicios(dia['exercicios'])
         elif dia_alvo:
-            # Refresh único (objeto solto)
             obj_dia = novo_dado_ia.get('treino', novo_dado_ia)
             if isinstance(obj_dia, list) and len(obj_dia) > 0: obj_dia = obj_dia[0]
             
@@ -587,9 +610,8 @@ def regenerar_secao(dados: dict):
     if dia_alvo and secao in ["dieta", "treino"]:
         lista_atual = ultimo_dossie.get('conteudo_bruto', {}).get('json_full', {}).get(secao, [])
         idx_alvo = -1
-        # Busca flexível pelo dia
         for i, item in enumerate(lista_atual):
-            if dia_alvo.lower() in item.get('dia', '').lower():
+            if dia_alvo.lower() in str(item.get('dia', '')).lower():
                 idx_alvo = i
                 break
         
@@ -626,7 +648,7 @@ def buscar_historico(usuario: str):
     user = db.usuarios.find_one({"usuario": usuario})
     if not user: return {"sucesso": True, "historico": []}
     
-    # Retorna também o perfil atual para sincronização rápida do frontend
+    # Perfil sanitizado para evitar nulos ou tipos errados no front
     perfil = {
         "peso": user.get('peso'),
         "altura": user.get('altura'),
@@ -717,26 +739,19 @@ def postar_comentario(dados: dict):
 
 @app.get("/social/ranking")
 def get_ranking_global():
-    # Retorna usuários ordenados por pontos, excluindo Admins para competição justa
     users = list(db.usuarios.find(
         {"is_admin": False}, 
         {"nome": 1, "usuario": 1, "pontos": 1, "foto_perfil": 1, "_id": 0}
     ).sort("pontos", -1).limit(50))
-    
     return {"sucesso": True, "ranking": users}
 
 @app.get("/social/checkins")
 def get_checkins(usuario: str):
-    # Busca histórico de checkins do mês atual para o calendário
     now = datetime.now()
-    # Filtra do dia 1 do mês atual até agora
     start_date = datetime(now.year, now.month, 1).isoformat()
-    
     checkins = list(db.checkins.find(
         {"usuario": usuario, "data": {"$gte": start_date}}
     ))
-    
-    # Formata para o frontend: {1: 'gym', 2: 'run'}
     formatted = {}
     for c in checkins:
         try:
@@ -744,7 +759,6 @@ def get_checkins(usuario: str):
             formatted[day] = c['tipo']
         except:
             pass
-            
     return {"sucesso": True, "checkins": formatted}
 
 @app.post("/social/validar-conquista")
@@ -753,7 +767,6 @@ async def validar_conquista(
     tipo: str = Form(...), 
     foto: UploadFile = File(...)
 ):
-    # 1. Verifica se já fez checkin hoje
     now = datetime.now()
     today_start = datetime(now.year, now.month, now.day).isoformat()
     
@@ -765,22 +778,17 @@ async def validar_conquista(
     if ja_fez:
         return {"sucesso": False, "mensagem": "Você já treinou hoje! Volte amanhã."}
 
-    # 2. Processa Imagem
     content = await foto.read()
     img_otimizada = otimizar_imagem(content, size=(800, 800))
     
-    # 3. Prompt de Validação IA (Gamemaster)
     prompt_juiz = f"""
     ATUE COMO UM JUIZ RIGOROSO DE FITNESS.
     O usuário diz que fez um treino do tipo: '{tipo}' (gym=academia, home=casa, run=corrida).
-    
     Analise a imagem anexada.
     - Se for 'gym', procure equipamentos de academia, espelhos, pesos, roupas de treino.
     - Se for 'home', procure tapete de yoga, pesos livres, roupa de ginástica em ambiente doméstico.
     - Se for 'run', procure ambiente externo (rua/parque), esteira, tênis de corrida, suor.
-    
     IMPORTANTE: Selfies no espelho VALEM se o contexto bater.
-    
     Responda APENAS: "APROVADO" ou "REPROVADO".
     """
     
@@ -788,21 +796,16 @@ async def validar_conquista(
     
     if resultado_ia and "APROVADO" in resultado_ia.upper():
         pontos_ganhos = 50
-        
-        # Registra o Check-in
         db.checkins.insert_one({
             "usuario": usuario,
             "tipo": tipo,
             "data": datetime.now().isoformat(),
             "pontos": pontos_ganhos
         })
-        
-        # Atualiza Pontuação Global do Usuário
         db.usuarios.update_one(
             {"usuario": usuario},
             {"$inc": {"pontos": pontos_ganhos}}
         )
-        
         return {"sucesso": True, "aprovado": True, "pontos": pontos_ganhos}
     else:
         return {"sucesso": True, "aprovado": False, "mensagem": "A IA não identificou evidências claras do treino."}
