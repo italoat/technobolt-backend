@@ -20,7 +20,7 @@ import difflib
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="89.2-Elite-Bulking")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="89.3-Elite-Stable-Fix")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
 EXERCISE_KEYS = []
@@ -88,7 +88,7 @@ def limpar_e_parsear_json(texto_ia):
     try:
         texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
         parsed = json.loads(texto_limpo)
-        # Aplica a sanitização recursiva para evitar erro de tipos no Flutter
+        # Aplica a sanitização recursiva de forma obrigatória
         return sanitizar_json_ia(parsed)
     except Exception as e:
         print(f"Erro ao parsear JSON da IA: {e}")
@@ -102,15 +102,16 @@ def limpar_e_parsear_json(texto_ia):
 # Função crítica para evitar o erro 'double is not subtype of String'
 def sanitizar_json_ia(data):
     """
-    Percorre o JSON recursivamente e converte números em strings 
-    para campos que o Flutter espera que sejam texto.
+    Percorre o JSON recursivamente e converte números (int, float) em strings 
+    para garantir que o Flutter (fortemente tipado) não quebre ao tentar
+    renderizar um Double em um Text() widget.
     """
     if isinstance(data, dict):
         return {k: sanitizar_json_ia(v) for k, v in data.items()}
     elif isinstance(data, list):
         return [sanitizar_json_ia(v) for v in data]
     elif isinstance(data, (int, float)):
-        # Se encontrou um número solto onde deveria ser estrutura ou texto, converte pra string
+        # Converte número forçadamente para String
         return str(data)
     else:
         return data
@@ -173,7 +174,7 @@ def validar_e_corrigir_exercicios(lista_exercicios):
                     pasta_github = db_map_norm[fallback_key]
                     nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
 
-        ex['nome'] = nome_final
+        ex['nome'] = str(nome_final)
         
         if pasta_github:
             ex['imagens_demonstracao'] = [
@@ -391,7 +392,7 @@ async def executar_analise(
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     imc = peso / ((altura/100)**2)
     
-    # [PROMPT MESTRE - ATUALIZADO PARA SUPERÁVIT CALÓRICO]
+    # [PROMPT MESTRE]
     prompt_mestre = f"""
     VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica e Nutrição). 
     SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O ALUNO, MAXIMIZANDO RESULTADOS.
@@ -473,6 +474,7 @@ async def executar_analise(
     resultado_raw = rodar_ia(prompt_mestre, img_otimizada)
     if not resultado_raw: raise HTTPException(503, "IA Indisponível.")
 
+    # A FUNÇÃO LIMPAR_E_PARSEAR_JSON JÁ CHAMA O SANITIZAR_JSON_IA AGORA
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
     if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
@@ -483,9 +485,13 @@ async def executar_analise(
             if 'exercicios' in dia and isinstance(dia['exercicios'], list):
                 dia['exercicios'] = validar_e_corrigir_exercicios(dia['exercicios'])
 
+    # [CORREÇÃO CRÍTICA] Força o peso_reg a ser String para o Flutter não quebrar
+    # A maioria dos widgets Text() no Flutter espera uma String. Se passar o float direto, dá erro.
+    peso_str = str(peso)
+
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "peso_reg": peso, # Mantemos como float aqui, o front deve tratar se for exibir
+        "peso_reg": peso_str, 
         "conteudo_bruto": {
             "json_full": conteudo_json,
             "r1": str(conteudo_json.get('avaliacao', {}).get('insight', '')),
@@ -650,13 +656,13 @@ def buscar_historico(usuario: str):
     
     # Perfil sanitizado para evitar nulos ou tipos errados no front
     perfil = {
-        "peso": user.get('peso'),
-        "altura": user.get('altura'),
-        "genero": user.get('genero', 'Masculino'),
-        "restricoes_alim": user.get('restricoes_alim', ''),
-        "restricoes_fis": user.get('restricoes_fis', ''),
-        "medicamentos": user.get('medicamentos', ''),
-        "info_add": user.get('info_add', ''),
+        "peso": str(user.get('peso', '')), # [FIX] Convertendo peso para string no endpoint de histórico também
+        "altura": str(user.get('altura', '')), # [FIX] Convertendo altura para string
+        "genero": str(user.get('genero', 'Masculino')),
+        "restricoes_alim": str(user.get('restricoes_alim', '')),
+        "restricoes_fis": str(user.get('restricoes_fis', '')),
+        "medicamentos": str(user.get('medicamentos', '')),
+        "info_add": str(user.get('info_add', '')),
         "creditos": user.get('avaliacoes_restantes', 0)
     }
     
