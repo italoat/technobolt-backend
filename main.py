@@ -20,7 +20,7 @@ import difflib
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="90.1-Elite-TypeSafe-Final")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="91.0-Elite-Senior-Fix")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
 EXERCISE_KEYS = []
@@ -37,8 +37,13 @@ try:
 except Exception as e:
     print(f"⚠️ AVISO CRÍTICO: Erro ao carregar exercises.json. A API funcionará, mas sem imagens. Erro: {e}")
 
-# --- MOTORES DE IA (MANTIDOS EXATAMENTE IGUAIS) ---
-MOTORES_TECHNOBOLT = ["models/gemini-3-flash-preview", "models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-flash-latest"]
+# --- MOTORES DE IA (MANTIDOS ESTRITAMENTE IGUAIS) ---
+MOTORES_TECHNOBOLT = [
+    "models/gemini-3-flash-preview", 
+    "models/gemini-2.5-flash", 
+    "models/gemini-2.0-flash", 
+    "models/gemini-flash-latest"
+]
 
 # --- CONEXÃO BANCO ---
 def get_database():
@@ -55,7 +60,7 @@ def get_database():
 db = get_database()
 
 # --- [SENIOR FIX] SANITIZAÇÃO GLOBAL DE TIPOS ---
-# Essa função garante que NENHUM número chegue ao Flutter sem as aspas de String.
+# Garante que o Flutter nunca receba um Double/Int onde espera String
 def preparar_resposta_frontend(data):
     """
     Percorre qualquer estrutura (Dict, List, Valor) e converte 
@@ -66,9 +71,9 @@ def preparar_resposta_frontend(data):
     elif isinstance(data, list):
         return [preparar_resposta_frontend(v) for v in data]
     elif isinstance(data, (int, float)):
-        return str(data)  # A Mágica acontece aqui: 80.5 vira "80.5"
+        return str(data) 
     elif data is None:
-        return "" # Null vira string vazia para segurança extra
+        return "" 
     else:
         return data
 
@@ -100,18 +105,28 @@ def rodar_ia(prompt, imagem_bytes=None):
 
 def limpar_e_parsear_json(texto_ia):
     try:
-        texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
+        # 1. Extração Robusta com Regex (Pega apenas o conteúdo entre chaves)
+        # Isso evita erros quando a IA coloca texto antes ou depois do JSON
+        match = re.search(r'\{.*\}', texto_ia, re.DOTALL)
+        if match:
+            texto_limpo = match.group(0)
+        else:
+            texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
+
+        # 2. Parseamento
         parsed = json.loads(texto_limpo)
-        # Sanitização imediata do retorno da IA
+        
+        # 3. Sanitização de Tipos (Blindagem para o Flutter)
         return preparar_resposta_frontend(parsed)
     except Exception as e:
         print(f"Erro ao parsear JSON da IA: {e}")
-        return {
-            "avaliacao": {"insight": "Erro na leitura da IA"},
+        # Retorno de fallback estruturado para não quebrar o app
+        return preparar_resposta_frontend({
+            "avaliacao": {"insight": "Houve uma instabilidade na análise detalhada, mas geramos um protocolo base de segurança."},
             "dieta": [],
             "suplementacao": [],
             "treino": []
-        }
+        })
 
 def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     try:
@@ -297,7 +312,6 @@ def login(dados: dict):
     if user.get("status") != "ativo" and not user.get("is_admin"):
         raise HTTPException(403, "Sua conta está aguardando ativação pelo administrador.")
     
-    # Prepara resposta segura com sanitização
     raw_response = {
         "sucesso": True,
         "dados": {
@@ -345,14 +359,10 @@ def atualizar_perfil(dados: dict):
         "medicamentos": dados.get('medicamentos'),
         "info_add": dados.get('info_add'),
     }
-    
     if 'foto_perfil' in dados:
         update_data['foto_perfil'] = dados.get('foto_perfil')
 
-    db.usuarios.update_one(
-        {"usuario": dados['usuario']},
-        {"$set": update_data}
-    )
+    db.usuarios.update_one({"usuario": dados['usuario']}, {"$set": update_data})
     return {"sucesso": True}
 
 # --- ENDPOINTS: ANÁLISE (ESTRUTURADA PARA JSON) ---
@@ -362,18 +372,26 @@ async def executar_analise(
     usuario: str = Form(...),
     nome_completo: str = Form(...),
     peso: str = Form(...), # Recebe string para tratar virgula/ponto
-    altura: int = Form(...),
+    altura: str = Form(...), # Recebe string
     objetivo: str = Form(...),
     genero: str = Form("Masculino"),
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
-    # Tratamento de Peso (Aceita "80,5" ou "80.5")
     try:
-        peso_clean = peso.replace(',', '.')
+        peso_clean = str(peso).replace(',', '.')
         peso_float = float(peso_clean)
-    except:
-        peso_float = 0.0
+        
+        altura_clean = str(altura).replace(',', '.').replace('cm', '').strip()
+        altura_float = float(altura_clean)
+        if altura_float > 3.0: # Se usuário digitou em cm (180), converte pra m (1.80) para cálculo IMC se necessário, mas guarda o int
+             altura_int = int(altura_float)
+        else:
+             altura_int = int(altura_float * 100)
+             
+    except ValueError:
+        peso_float = 70.0 # Valores de fallback seguros
+        altura_int = 175
 
     # Atualiza dados no banco
     db.usuarios.update_one(
@@ -381,7 +399,7 @@ async def executar_analise(
         {"$set": {
             "nome": nome_completo, 
             "peso": peso_float, 
-            "altura": altura, 
+            "altura": altura_int, 
             "genero": genero,
             "info_add": observacoes
         }}
@@ -395,46 +413,43 @@ async def executar_analise(
 
     content = await foto.read()
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
-    imc = peso_float / ((altura/100)**2)
     
-    # [PROMPT MESTRE - ATUALIZADO PARA SUPERÁVIT CALÓRICO]
+    # Cálculo do IMC para contexto
+    altura_m = altura_int / 100
+    imc = peso_float / (altura_m**2) if altura_m > 0 else 24.0
+    
+    # [PROMPT MESTRE - ATUALIZADO E BLINDADO]
     prompt_mestre = f"""
-    VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica e Nutrição). 
-    SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O ALUNO, MAXIMIZANDO RESULTADOS.
+    VOCÊ É UM TREINADOR DE ELITE E NUTRICIONISTA PhD.
+    SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO PARA MAXIMIZAR RESULTADOS (Hipertrofia/Definição).
     
-    PERFIL: {nome_completo}, {genero}, IMC {imc:.2f}, OBJETIVO: {objetivo}.
+    PERFIL: {nome_completo}, {genero}, {peso_float}kg, {altura_int}cm, IMC {imc:.2f}.
+    OBJETIVO: {objetivo}.
     RESTRIÇÕES: Alimentares: "{r_a}", Físicas: "{r_f}", Meds: "{r_m}", Obs: "{info}".
 
-    REGRAS CRÍTICAS DE OUTPUT (SIGA RIGOROSAMENTE):
-    1. **TREINO (O MAIS IMPORTANTE)**: 
-       - **USE APENAS EXERCÍCIOS DESTA LISTA ABAIXO (COPIE O NOME EXATO):**
-       [ {EXERCISE_LIST_STRING} ]
-       - Se você escolher um exercício fora dessa lista, o aplicativo quebrará. SEJA ESTRITO.
-       - Título do dia: APENAS O NOME DO DIA DA SEMANA (Ex: "Segunda-feira").
-       - Coloque o foco muscular no campo 'foco' (Ex: "Peito e Tríceps").
-       - **VOLUME ALTO DE TREINO:** Para maximizar resultados, gere entre **8 a 12 exercícios por sessão**.
-       - Gere para os 7 dias.
-       - OBRIGATÓRIO: campo 'execucao' detalhado sem emojis.
-
-    2. PROIBIDO RETORNAR NULL ou "Sem dados". Se faltar info, ESTIME com base no IMC e Objetivo.
+    REGRAS ESTRITAS DE OUTPUT (JSON APENAS):
     
-    3. **ANÁLISE CORPORAL E BIOMETRIA:**
-       - Na seção 'avaliacao', analise a composição corporal atual considerando que o objetivo requer construção muscular.
-       - Mencione o planejamento de Bulking/Manutenção no 'insight'.
+    1. **TREINO (INDIVIDUALIZADO):**
+       - Use APENAS exercícios desta lista: [ {EXERCISE_LIST_STRING} ]
+       - Se o exercício ideal não estiver na lista, escolha a variação mais próxima da lista.
+       - Estrutura: "dia", "foco", e lista de "exercicios".
+       - DENTRO DE CADA EXERCÍCIO, adicione o campo "justificativa_individual": Explique em 1 frase curta por que este exercício foi escolhido para a biomecânica/objetivo DESTA pessoa.
+       - Campo "execucao": Detalhe técnico.
+       - "treino_insight": Explique a lógica geral da divisão de treino escolhida.
 
-    4. **DIETA (SUPERÁVIT CALÓRICO):**
-       - **CALCULE O GASTO ENERGÉTICO TOTAL (GET)** do aluno.
-       - **OBRIGATÓRIO:** APLIQUE UM **SUPERÁVIT CALÓRICO (BULKING LIMPO)** de aproximadamente **+300 a +500 kcal** sobre o GET para garantir o ganho de massa, a não ser que o objetivo seja explicitamente 'Perda de Peso' ou 'Cutting'.
-       - Preencha 'macros_totais' refletindo esse superávit (Ex: Proteína alta ~2g/kg, Carbo alto para energia).
-       - Crie cardápios completos para 7 dias.
+    2. **DIETA (SUPERÁVIT CALÓRICO/BULKING LIMPO):**
+       - Calcule o Gasto Energético Total (GET) estimado.
+       - Aplique um Superávit Calórico de +300 a +500 kcal (salvo se o objetivo for estritamente perda de peso severa).
+       - Preencha 'macros_totais' explicitando o superávit (ex: "3200kcal (Superávit) | P: 180g...").
+       - "dieta_insight": Explique o cálculo do superávit para suportar o anabolismo.
 
-    5. SUPLEMENTAÇÃO: Se o aluno não tiver restrição médica grave, sugira o básico (Creatina, Whey, Multivitamínico). Preencha dose/horário.
+    3. **RETORNO JSON PURO:** Sem markdown (```json), sem texto antes ou depois.
 
-    RETORNE APENAS JSON VÁLIDO:
+    ESTRUTURA JSON OBRIGATÓRIA:
     {{
       "avaliacao": {{
         "segmentacao": {{ "tronco": "...", "superior": "...", "inferior": "..." }},
-        "dobras": {{ "abdominal": "X mm", "suprailiaca": "X mm", "peitoral": "X mm" }},
+        "dobras": {{ "abdominal": "...", "suprailiaca": "...", "peitoral": "..." }},
         "analise_postural": "...",
         "simetria": "...",
         "insight": "..."
@@ -443,34 +458,28 @@ async def executar_analise(
         {{
             "dia": "Segunda-feira",
             "foco_nutricional": "...",
-            "refeicoes": [
-                {{ "horario": "08:00", "nome": "Café", "alimentos": "..." }}
-            ],
-            "macros_totais": "P: Xg | C: Yg | G: Zg (Superávit Aplicado)"
-        }},
-        ...
+            "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ],
+            "macros_totais": "..."
+        }}
       ],
       "dieta_insight": "...",
-      "suplementacao": [
-        {{ "nome": "Creatina", "dose": "5g", "horario": "Pós-treino", "motivo": "Força" }}
-      ],
+      "suplementacao": [ {{ "nome": "...", "dose": "...", "horario": "...", "motivo": "..." }} ],
       "suplementacao_insight": "...",
       "treino": [
         {{
           "dia": "Segunda-feira",
-          "foco": "Peito e Tríceps",
+          "foco": "...",
           "exercicios": [
             {{ 
-               "nome": "Supino Reto com Barra", 
-               "series_reps": "4x10",
-               "execucao": "..."
-            }},
-            ... (Insira de 8 a 12 exercícios aqui)
+               "nome": "NOME EXATO DA LISTA", 
+               "series_reps": "...",
+               "execucao": "...",
+               "justificativa_individual": "..." 
+            }}
           ],
           "treino_alternativo": "...",
           "justificativa": "..."
-        }},
-        ...
+        }}
       ],
       "treino_insight": "..."
     }}
@@ -494,10 +503,10 @@ async def executar_analise(
         "peso_reg": peso_float,
         "conteudo_bruto": {
             "json_full": conteudo_json,
-            "r1": conteudo_json.get('avaliacao', {}).get('insight', ''),
-            "r2": conteudo_json.get('dieta_insight', ''),
-            "r3": conteudo_json.get('suplementacao_insight', ''),
-            "r4": conteudo_json.get('treino_insight', '')
+            "r1": str(conteudo_json.get('avaliacao', {}).get('insight', '')),
+            "r2": str(conteudo_json.get('dieta_insight', '')),
+            "r3": str(conteudo_json.get('suplementacao_insight', '')),
+            "r4": str(conteudo_json.get('treino_insight', ''))
         }
     }
     
@@ -506,8 +515,7 @@ async def executar_analise(
     else:
         db.usuarios.update_one({"usuario": usuario}, {"$push": {"historico_dossies": dossie}})
     
-    # [SENIOR FIX] Aplica a sanitização em TODO o dossiê final antes de enviar
-    # Isso converte o peso_reg float em string e qualquer outro número
+    # Sanitização FINAL e OBRIGATÓRIA antes de enviar para o Flutter
     return preparar_resposta_frontend({"sucesso": True, "resultado": dossie})
 
 @app.post("/analise/regenerar-secao")
@@ -517,19 +525,19 @@ def regenerar_secao(dados: dict):
     dia_alvo = dados.get("dia") 
     
     if not usuario or secao not in ["dieta", "treino", "suplementacao", "avaliacao"]:
-        return {"sucesso": False, "mensagem": "Seção inválida."}
+        return preparar_resposta_frontend({"sucesso": False, "mensagem": "Seção inválida."})
 
     user_data = db.usuarios.find_one({"usuario": usuario})
-    if not user_data: return {"sucesso": False, "mensagem": "Usuário não encontrado."}
+    if not user_data: return preparar_resposta_frontend({"sucesso": False, "mensagem": "Usuário não encontrado."})
     
     creditos = user_data.get('avaliacoes_restantes', 0)
     is_admin = user_data.get('is_admin', False)
 
     if creditos <= 0 and not is_admin:
-        return {"sucesso": False, "mensagem": "Saldo insuficiente."}
+        return preparar_resposta_frontend({"sucesso": False, "mensagem": "Saldo insuficiente."})
 
     if not user_data.get('historico_dossies'):
-        return {"sucesso": False, "mensagem": "Sem histórico."}
+        return preparar_resposta_frontend({"sucesso": False, "mensagem": "Sem histórico."})
 
     ultimo_dossie = user_data['historico_dossies'][-1]
     
@@ -550,13 +558,14 @@ def regenerar_secao(dados: dict):
             1. USE **APENAS** EXERCÍCIOS DESTA LISTA: [ {EXERCISE_LIST_STRING} ]
             2. VOLUME ALTO: Gere entre **6 a 9 exercícios**.
             3. Título do dia: APENAS "{dia_alvo}".
+            4. JUSTIFICATIVA INDIVIDUAL: Em cada exercício, explique o motivo da escolha.
             
             RETORNE APENAS O JSON DO OBJETO DO DIA:
             {{ 
               "dia": "{dia_alvo}", 
               "foco": "...", 
               "exercicios": [
-                {{ "nome": "...", "series_reps": "...", "execucao": "..." }}
+                {{ "nome": "...", "series_reps": "...", "execucao": "...", "justificativa_individual": "..." }}
               ], 
               "treino_alternativo": "...",
               "justificativa": "..."
@@ -590,12 +599,12 @@ def regenerar_secao(dados: dict):
         - Sem dados nulos. 
         - Títulos dos dias apenas o nome da semana.
         - Se for dieta, inclua 'macros_totais' com SUPERÁVIT CALÓRICO para ganho de massa.
-        - Se for suplementacao, inclua dose e horario.
+        - Se for treino, inclua 'justificativa_individual' nos exercícios.
         RETORNE JSON: {{ "{secao}": [ ... ] }}
         """
 
     resultado_texto = rodar_ia(prompt_regeneracao)
-    if not resultado_texto: return {"sucesso": False, "mensagem": "Erro IA."}
+    if not resultado_texto: return preparar_resposta_frontend({"sucesso": False, "mensagem": "Erro IA."})
 
     novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
@@ -643,21 +652,19 @@ def regenerar_secao(dados: dict):
         db.usuarios.update_one({"usuario": usuario}, mongo_cmd)
         
         user_atualizado = db.usuarios.find_one({"usuario": usuario})
-        # [SENIOR FIX] Sanitização também no refresh
         return preparar_resposta_frontend({
             "sucesso": True, 
             "resultado": user_atualizado['historico_dossies'][-1],
             "novo_saldo": user_atualizado.get('avaliacoes_restantes', 0)
         })
     
-    return {"sucesso": False, "mensagem": "Estrutura inválida."}
+    return preparar_resposta_frontend({"sucesso": False, "mensagem": "Estrutura inválida."})
 
 @app.get("/historico/{usuario}")
 def buscar_historico(usuario: str):
     user = db.usuarios.find_one({"usuario": usuario})
-    if not user: return {"sucesso": True, "historico": []}
+    if not user: return preparar_resposta_frontend({"sucesso": True, "historico": []})
     
-    # [SENIOR FIX] Sanitização global do retorno de histórico
     raw_response = {
         "sucesso": True, 
         "historico": user.get('historico_dossies', []), 
@@ -685,7 +692,7 @@ def get_feed():
         p['likes'] = p.get('likes', [])
         p['comentarios'] = p.get('comentarios', [])
         p['medalha'] = calcular_medalha(p.get('autor'))
-    return {"sucesso": True, "feed": posts}
+    return preparing_resposta_frontend({"sucesso": True, "feed": posts})
 
 @app.post("/social/postar")
 async def postar_feed(usuario: str = Form(...), legenda: str = Form(...), imagem: UploadFile = File(...)):
@@ -708,19 +715,19 @@ async def postar_feed(usuario: str = Form(...), legenda: str = Form(...), imagem
     if comentario_ia:
         db.posts.update_one({"_id": post_id}, {"$push": {"comentarios": {"autor": "TechnoBolt AI 🤖", "texto": comentario_ia}}})
 
-    return {"sucesso": True}
+    return preparar_resposta_frontend({"sucesso": True})
 
 @app.post("/social/post/deletar")
 def deletar_post_social(dados: dict):
     try:
         post_id = dados.get("post_id")
         usuario = dados.get("usuario")
-        if not post_id or not usuario: return {"sucesso": False, "mensagem": "Dados incompletos"}
+        if not post_id or not usuario: return preparar_resposta_frontend({"sucesso": False, "mensagem": "Dados incompletos"})
         try: oid = ObjectId(post_id)
-        except: return {"sucesso": False, "mensagem": "ID inválido"}
+        except: return preparar_resposta_frontend({"sucesso": False, "mensagem": "ID inválido"})
         result = db.posts.delete_one({"_id": oid, "autor": usuario})
-        return {"sucesso": True} if result.deleted_count > 0 else {"sucesso": False}
-    except Exception as e: return {"sucesso": False, "mensagem": str(e)}
+        return preparar_resposta_frontend({"sucesso": True} if result.deleted_count > 0 else {"sucesso": False})
+    except Exception as e: return preparing_resposta_frontend({"sucesso": False, "mensagem": str(e)})
         
 @app.post("/social/curtir")
 def curtir_post(dados: dict):
@@ -728,12 +735,12 @@ def curtir_post(dados: dict):
         post_id = dados.get("post_id")
         usuario = dados.get("usuario")
         post = db.posts.find_one({"_id": ObjectId(post_id)})
-        if not post: return {"sucesso": False, "mensagem": "Post não encontrado"}
+        if not post: return preparar_resposta_frontend({"sucesso": False, "mensagem": "Post não encontrado"})
         if usuario in post.get("likes", []):
             db.posts.update_one({"_id": ObjectId(post_id)}, {"$pull": {"likes": usuario}})
         else:
             db.posts.update_one({"_id": ObjectId(post_id)}, {"$addToSet": {"likes": usuario}})
-        return {"sucesso": True}
+        return preparar_resposta_frontend({"sucesso": True})
     except Exception as e:
         raise HTTPException(500, f"Erro ao processar like: {str(e)}")
         
@@ -744,7 +751,7 @@ def postar_comentario(dados: dict):
         usuario = dados.get("usuario")
         texto = dados.get("texto")
         db.posts.update_one({"_id": ObjectId(post_id)}, {"$push": {"comentarios": {"autor": usuario, "texto": texto, "data": datetime.now().isoformat()}}})
-        return {"sucesso": True}
+        return preparar_resposta_frontend({"sucesso": True})
     except Exception as e:
         raise HTTPException(500, f"Erro ao postar comentário: {str(e)}")
 
@@ -756,7 +763,7 @@ def get_ranking_global():
         {"is_admin": False}, 
         {"nome": 1, "usuario": 1, "pontos": 1, "foto_perfil": 1, "_id": 0}
     ).sort("pontos", -1).limit(50))
-    return {"sucesso": True, "ranking": users}
+    return preparar_resposta_frontend({"sucesso": True, "ranking": users})
 
 @app.get("/social/checkins")
 def get_checkins(usuario: str):
@@ -772,7 +779,7 @@ def get_checkins(usuario: str):
             formatted[day] = c['tipo']
         except:
             pass
-    return {"sucesso": True, "checkins": formatted}
+    return preparar_resposta_frontend({"sucesso": True, "checkins": formatted})
 
 @app.post("/social/validar-conquista")
 async def validar_conquista(
@@ -789,7 +796,7 @@ async def validar_conquista(
     })
     
     if ja_fez:
-        return {"sucesso": False, "mensagem": "Você já treinou hoje! Volte amanhã."}
+        return preparar_resposta_frontend({"sucesso": False, "mensagem": "Você já treinou hoje! Volte amanhã."})
 
     content = await foto.read()
     img_otimizada = otimizar_imagem(content, size=(800, 800))
@@ -819,33 +826,33 @@ async def validar_conquista(
             {"usuario": usuario},
             {"$inc": {"pontos": pontos_ganhos}}
         )
-        return {"sucesso": True, "aprovado": True, "pontos": pontos_ganhos}
+        return preparar_resposta_frontend({"sucesso": True, "aprovado": True, "pontos": pontos_ganhos})
     else:
-        return {"sucesso": True, "aprovado": False, "mensagem": "A IA não identificou evidências claras do treino."}
+        return preparar_resposta_frontend({"sucesso": True, "aprovado": False, "mensagem": "A IA não identificou evidências claras do treino."})
 
 # --- ENDPOINTS: ADMIN ---
 
 @app.get("/setup/criar-admin")
 def criar_admin_inicial():
-    if db.usuarios.find_one({"usuario": "admin"}): return {"sucesso": False, "mensagem": "Admin já existe!"}
+    if db.usuarios.find_one({"usuario": "admin"}): return preparar_resposta_frontend({"sucesso": False, "mensagem": "Admin já existe!"})
     db.usuarios.insert_one({"usuario": "admin", "senha": "123", "nome": "Super Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999, "historico_dossies": [], "peso": 80.0, "altura": 180, "genero": "Masculino"})
-    return {"sucesso": True, "mensagem": "Admin criado"}
+    return preparar_resposta_frontend({"sucesso": True, "mensagem": "Admin criado"})
 
 @app.get("/admin/listar")
 def listar_usuarios():
     users = list(db.usuarios.find())
     for u in users: u['_id'] = str(u['_id'])
-    return {"sucesso": True, "usuarios": users}
+    return preparar_resposta_frontend({"sucesso": True, "usuarios": users})
 
 @app.post("/admin/editar")
 def editar_usuario(dados: dict):
     db.usuarios.update_one({"usuario": dados['target_user']}, {"$set": {"status": dados.get('status'), "avaliacoes_restantes": int(dados.get('creditos', 0))}})
-    return {"sucesso": True}
+    return preparar_resposta_frontend({"sucesso": True})
 
 @app.post("/admin/excluir")
 def excluir_usuario(dados: dict):
     db.usuarios.delete_one({"usuario": dados['target_user']})
-    return {"sucesso": True}
+    return preparar_resposta_frontend({"sucesso": True})
 
 # --- ENDPOINT: BAIXAR PDF ---
 
@@ -958,15 +965,15 @@ def baixar_pdf_completo(usuario: str):
 @app.get("/chat/usuarios")
 def listar_usuarios_chat(usuario_atual: str):
     users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
-    return {"sucesso": True, "usuarios": users}
+    return preparing_resposta_frontend({"sucesso": True, "usuarios": users})
 
 @app.get("/chat/mensagens")
 def pegar_mensagens(user1: str, user2: str):
     msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
     for m in msgs: m['_id'] = str(m['_id'])
-    return {"sucesso": True, "mensagens": msgs}
+    return preparing_resposta_frontend({"sucesso": True, "mensagens": msgs})
 
 @app.post("/chat/enviar")
 def enviar_mensagem(dados: dict):
     db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
-    return {"sucesso": True}
+    return preparing_resposta_frontend({"sucesso": True})
