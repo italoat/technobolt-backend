@@ -20,7 +20,7 @@ import difflib
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="89.3-Elite-Stable-Fix")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="89.4-Elite-Stable-Fix-Types")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
 EXERCISE_KEYS = []
@@ -37,8 +37,13 @@ try:
 except Exception as e:
     print(f"⚠️ AVISO CRÍTICO: Erro ao carregar exercises.json. A API funcionará, mas sem imagens. Erro: {e}")
 
-# --- MOTORES DE IA ---
-MOTORES_TECHNOBOLT = ["models/gemini-3-flash-preview", "models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-flash-latest"]
+# --- MOTORES DE IA (LISTA ATUALIZADA) ---
+MOTORES_TECHNOBOLT = [
+    "models/gemini-3-flash-preview", 
+    "models/gemini-2.5-flash", 
+    "models/gemini-2.0-flash", 
+    "models/gemini-flash-latest"
+]
 
 # --- CONEXÃO BANCO ---
 def get_database():
@@ -359,19 +364,26 @@ def atualizar_perfil(dados: dict):
 async def executar_analise(
     usuario: str = Form(...),
     nome_completo: str = Form(...),
-    peso: float = Form(...),
+    peso: str = Form(...), # [SENIOR] Alterado para str para tratar vírgula
     altura: int = Form(...),
     objetivo: str = Form(...),
     genero: str = Form("Masculino"),
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
+    # Tratamento da String de Peso (Aceitar vírgula e ponto)
+    try:
+        peso_limpo = peso.replace(',', '.')
+        peso_float = float(peso_limpo)
+    except ValueError:
+        raise HTTPException(400, "Formato de peso inválido. Use números (ex: 80.5 ou 80,5)")
+
     # Atualiza dados no banco
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
             "nome": nome_completo, 
-            "peso": peso, 
+            "peso": peso_float, 
             "altura": altura, 
             "genero": genero,
             "info_add": observacoes
@@ -386,9 +398,9 @@ async def executar_analise(
 
     content = await foto.read()
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
-    imc = peso / ((altura/100)**2)
+    imc = peso_float / ((altura/100)**2)
     
-    # [PROMPT MESTRE]
+    # [PROMPT MESTRE - ATUALIZADO PARA SUPERÁVIT CALÓRICO]
     prompt_mestre = f"""
     VOCÊ É UM TREINADOR DE ELITE (PhD em Biomecânica e Nutrição). 
     SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO E ÚNICO PARA O ALUNO, MAXIMIZANDO RESULTADOS.
@@ -470,7 +482,6 @@ async def executar_analise(
     resultado_raw = rodar_ia(prompt_mestre, img_otimizada)
     if not resultado_raw: raise HTTPException(503, "IA Indisponível.")
 
-    # A FUNÇÃO LIMPAR_E_PARSEAR_JSON JÁ CHAMA O SANITIZAR_JSON_IA AGORA
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
     if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
@@ -481,13 +492,10 @@ async def executar_analise(
             if 'exercicios' in dia and isinstance(dia['exercicios'], list):
                 dia['exercicios'] = validar_e_corrigir_exercicios(dia['exercicios'])
 
-    # [CORREÇÃO CRÍTICA] Força o peso_reg a ser String para o Flutter não quebrar
-    # A maioria dos widgets Text() no Flutter espera uma String. Se passar o float direto, dá erro.
-    peso_str = str(peso)
-
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "peso_reg": peso_str, 
+        # [SENIOR FIX] Garante que peso_reg seja sempre string na saída
+        "peso_reg": str(peso_float), 
         "conteudo_bruto": {
             "json_full": conteudo_json,
             "r1": str(conteudo_json.get('avaliacao', {}).get('insight', '')),
@@ -652,8 +660,8 @@ def buscar_historico(usuario: str):
     
     # Perfil sanitizado para evitar nulos ou tipos errados no front
     perfil = {
-        "peso": str(user.get('peso', '')), # [FIX] Convertendo peso para string no endpoint de histórico também
-        "altura": str(user.get('altura', '')), # [FIX] Convertendo altura para string
+        "peso": str(user.get('peso', '')), 
+        "altura": str(user.get('altura', '')), 
         "genero": str(user.get('genero', 'Masculino')),
         "restricoes_alim": str(user.get('restricoes_alim', '')),
         "restricoes_fis": str(user.get('restricoes_fis', '')),
