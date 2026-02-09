@@ -20,7 +20,7 @@ import difflib
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="89.4-Elite-Stable-Fix-Types")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="90.1-Elite-TypeSafe-Final")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
 EXERCISE_KEYS = []
@@ -37,13 +37,8 @@ try:
 except Exception as e:
     print(f"⚠️ AVISO CRÍTICO: Erro ao carregar exercises.json. A API funcionará, mas sem imagens. Erro: {e}")
 
-# --- MOTORES DE IA (LISTA ATUALIZADA) ---
-MOTORES_TECHNOBOLT = [
-    "models/gemini-3-flash-preview", 
-    "models/gemini-2.5-flash", 
-    "models/gemini-2.0-flash", 
-    "models/gemini-flash-latest"
-]
+# --- MOTORES DE IA (MANTIDOS EXATAMENTE IGUAIS) ---
+MOTORES_TECHNOBOLT = ["models/gemini-3-flash-preview", "models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-flash-latest"]
 
 # --- CONEXÃO BANCO ---
 def get_database():
@@ -58,6 +53,24 @@ def get_database():
         return None
 
 db = get_database()
+
+# --- [SENIOR FIX] SANITIZAÇÃO GLOBAL DE TIPOS ---
+# Essa função garante que NENHUM número chegue ao Flutter sem as aspas de String.
+def preparar_resposta_frontend(data):
+    """
+    Percorre qualquer estrutura (Dict, List, Valor) e converte 
+    forçadamente int/float para string, prevenindo crash no Flutter.
+    """
+    if isinstance(data, dict):
+        return {k: preparar_resposta_frontend(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [preparar_resposta_frontend(v) for v in data]
+    elif isinstance(data, (int, float)):
+        return str(data)  # A Mágica acontece aqui: 80.5 vira "80.5"
+    elif data is None:
+        return "" # Null vira string vazia para segurança extra
+    else:
+        return data
 
 # --- FUNÇÕES UTILITÁRIAS GERAIS ---
 
@@ -89,8 +102,8 @@ def limpar_e_parsear_json(texto_ia):
     try:
         texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
         parsed = json.loads(texto_limpo)
-        # Aplica a sanitização recursiva de forma obrigatória
-        return sanitizar_json_ia(parsed)
+        # Sanitização imediata do retorno da IA
+        return preparar_resposta_frontend(parsed)
     except Exception as e:
         print(f"Erro ao parsear JSON da IA: {e}")
         return {
@@ -99,23 +112,6 @@ def limpar_e_parsear_json(texto_ia):
             "suplementacao": [],
             "treino": []
         }
-
-# Função crítica para evitar o erro 'double is not subtype of String'
-def sanitizar_json_ia(data):
-    """
-    Percorre o JSON recursivamente e converte números (int, float) em strings 
-    para garantir que o Flutter (fortemente tipado) não quebre ao tentar
-    renderizar um Double em um Text() widget.
-    """
-    if isinstance(data, dict):
-        return {k: sanitizar_json_ia(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [sanitizar_json_ia(v) for v in data]
-    elif isinstance(data, (int, float)):
-        # Converte número forçadamente para String
-        return str(data)
-    else:
-        return data
 
 def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
     try:
@@ -132,7 +128,6 @@ def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
 
 def normalizar_texto(texto):
     if not texto: return ""
-    # Proteção extra: garante que é string antes de normalizar
     if not isinstance(texto, str): texto = str(texto)
     return "".join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower().strip()
 
@@ -149,7 +144,7 @@ def validar_e_corrigir_exercicios(lista_exercicios):
         nome_ia_norm = normalizar_texto(nome_ia)
         
         pasta_github = None
-        nome_final = str(nome_ia) # Força string
+        nome_final = str(nome_ia)
 
         if nome_ia_norm in db_map_norm:
             pasta_github = db_map_norm[nome_ia_norm]
@@ -302,7 +297,8 @@ def login(dados: dict):
     if user.get("status") != "ativo" and not user.get("is_admin"):
         raise HTTPException(403, "Sua conta está aguardando ativação pelo administrador.")
     
-    return {
+    # Prepara resposta segura com sanitização
+    raw_response = {
         "sucesso": True,
         "dados": {
             "usuario": user['usuario'],
@@ -320,6 +316,7 @@ def login(dados: dict):
             "info_add": user.get('info_add', '')
         }
     }
+    return preparar_resposta_frontend(raw_response)
 
 @app.post("/auth/registro")
 def registrar(dados: dict):
@@ -364,19 +361,19 @@ def atualizar_perfil(dados: dict):
 async def executar_analise(
     usuario: str = Form(...),
     nome_completo: str = Form(...),
-    peso: str = Form(...), # [SENIOR] Alterado para str para tratar vírgula
+    peso: str = Form(...), # Recebe string para tratar virgula/ponto
     altura: int = Form(...),
     objetivo: str = Form(...),
     genero: str = Form("Masculino"),
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
-    # Tratamento da String de Peso (Aceitar vírgula e ponto)
+    # Tratamento de Peso (Aceita "80,5" ou "80.5")
     try:
-        peso_limpo = peso.replace(',', '.')
-        peso_float = float(peso_limpo)
-    except ValueError:
-        raise HTTPException(400, "Formato de peso inválido. Use números (ex: 80.5 ou 80,5)")
+        peso_clean = peso.replace(',', '.')
+        peso_float = float(peso_clean)
+    except:
+        peso_float = 0.0
 
     # Atualiza dados no banco
     db.usuarios.update_one(
@@ -494,14 +491,13 @@ async def executar_analise(
 
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        # [SENIOR FIX] Garante que peso_reg seja sempre string na saída
-        "peso_reg": str(peso_float), 
+        "peso_reg": peso_float,
         "conteudo_bruto": {
             "json_full": conteudo_json,
-            "r1": str(conteudo_json.get('avaliacao', {}).get('insight', '')),
-            "r2": str(conteudo_json.get('dieta_insight', '')),
-            "r3": str(conteudo_json.get('suplementacao_insight', '')),
-            "r4": str(conteudo_json.get('treino_insight', ''))
+            "r1": conteudo_json.get('avaliacao', {}).get('insight', ''),
+            "r2": conteudo_json.get('dieta_insight', ''),
+            "r3": conteudo_json.get('suplementacao_insight', ''),
+            "r4": conteudo_json.get('treino_insight', '')
         }
     }
     
@@ -510,7 +506,9 @@ async def executar_analise(
     else:
         db.usuarios.update_one({"usuario": usuario}, {"$push": {"historico_dossies": dossie}})
     
-    return {"sucesso": True, "resultado": dossie}
+    # [SENIOR FIX] Aplica a sanitização em TODO o dossiê final antes de enviar
+    # Isso converte o peso_reg float em string e qualquer outro número
+    return preparar_resposta_frontend({"sucesso": True, "resultado": dossie})
 
 @app.post("/analise/regenerar-secao")
 def regenerar_secao(dados: dict):
@@ -645,11 +643,12 @@ def regenerar_secao(dados: dict):
         db.usuarios.update_one({"usuario": usuario}, mongo_cmd)
         
         user_atualizado = db.usuarios.find_one({"usuario": usuario})
-        return {
+        # [SENIOR FIX] Sanitização também no refresh
+        return preparar_resposta_frontend({
             "sucesso": True, 
             "resultado": user_atualizado['historico_dossies'][-1],
             "novo_saldo": user_atualizado.get('avaliacoes_restantes', 0)
-        }
+        })
     
     return {"sucesso": False, "mensagem": "Estrutura inválida."}
 
@@ -658,19 +657,23 @@ def buscar_historico(usuario: str):
     user = db.usuarios.find_one({"usuario": usuario})
     if not user: return {"sucesso": True, "historico": []}
     
-    # Perfil sanitizado para evitar nulos ou tipos errados no front
-    perfil = {
-        "peso": str(user.get('peso', '')), 
-        "altura": str(user.get('altura', '')), 
-        "genero": str(user.get('genero', 'Masculino')),
-        "restricoes_alim": str(user.get('restricoes_alim', '')),
-        "restricoes_fis": str(user.get('restricoes_fis', '')),
-        "medicamentos": str(user.get('medicamentos', '')),
-        "info_add": str(user.get('info_add', '')),
-        "creditos": user.get('avaliacoes_restantes', 0)
+    # [SENIOR FIX] Sanitização global do retorno de histórico
+    raw_response = {
+        "sucesso": True, 
+        "historico": user.get('historico_dossies', []), 
+        "creditos": user.get('avaliacoes_restantes', 0), 
+        "perfil": {
+            "peso": user.get('peso'),
+            "altura": user.get('altura'),
+            "genero": user.get('genero', 'Masculino'),
+            "restricoes_alim": user.get('restricoes_alim', ''),
+            "restricoes_fis": user.get('restricoes_fis', ''),
+            "medicamentos": user.get('medicamentos', ''),
+            "info_add": user.get('info_add', ''),
+            "creditos": user.get('avaliacoes_restantes', 0)
+        }
     }
-    
-    return {"sucesso": True, "historico": user.get('historico_dossies', []), "creditos": user.get('avaliacoes_restantes', 0), "perfil": perfil}
+    return preparar_resposta_frontend(raw_response)
 
 # --- ENDPOINTS: SOCIAL E DESAFIOS ---
 
