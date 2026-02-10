@@ -77,7 +77,7 @@ class EnterpriseLogger:
         if logger.hasHandlers():
             logger.handlers.clear()
             
-        # Handler de Console (Stdout)
+        # Handler de Console (Stdout) com formatação rica
         console_handler = logging.StreamHandler()
         formatter = logging.Formatter(
             fmt='%(asctime)s | %(levelname)-8s | %(name)s | %(module)s:%(funcName)s:%(lineno)d | %(message)s',
@@ -86,13 +86,14 @@ class EnterpriseLogger:
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
         
-        # Handler de Arquivo para Erros Críticos (Persistência)
+        # Handler de Arquivo para Erros Críticos (Persistência e Auditoria)
         try:
             file_handler = logging.FileHandler("technobolt_critical.log", encoding='utf-8')
             file_handler.setLevel(logging.ERROR)
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
         except Exception as e:
+            # Fallback seguro caso não tenha permissão de escrita
             print(f"FATAL: Não foi possível criar arquivo de log: {e}")
             
         return logger
@@ -236,13 +237,13 @@ class ValidationBusinessError(BaseAPIException):
 def measure_time(func):
     """
     Decorator para medir tempo de execução de funções assíncronas.
-    Essencial para monitorar latência dos modelos de IA.
+    Essencial para monitorar latência dos modelos de IA e gargalos de I/O.
     """
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         start = time.perf_counter()
         func_name = func.__name__
-        request_id = str(uuid.uuid4())[:8]
+        request_id = str(uuid.uuid4())[:8] # Trace ID curto
         logger.info(f"⏳ [{request_id}] Iniciando execução de {func_name}...")
         try:
             result = await func(*args, **kwargs)
@@ -391,14 +392,14 @@ class AdminUserEdit(BaseModel):
     creditos: Optional[int] = None
 
 # ==============================================================================
-# SEÇÃO 8: REPOSITÓRIO DE EXERCÍCIOS (CACHE & OTIMIZAÇÃO DE PROMPT)
+# SEÇÃO 8: REPOSITÓRIO DE EXERCÍCIOS (CACHE & BLINDAGEM DE CONTEXTO)
 # ==============================================================================
 
 class ExerciseRepository:
     """
     Gerencia o carregamento e consulta do banco de exercícios local.
     Implementa Singleton para manter cache em memória e evitar I/O repetitivo.
-    Otimiza o uso de tokens limitando a lista injetada no prompt.
+    BLINDAGEM RESTAURADA: Injeta TODOS os exercícios no contexto para garantir precisão exata.
     """
     _db: Dict[str, str] = {}
     _keys_string: str = ""
@@ -415,13 +416,13 @@ class ExerciseRepository:
                 with open(path, "r", encoding="utf-8") as f:
                     cls._db = json.load(f)
             
-            # OTIMIZAÇÃO CRÍTICA DE TOKENS:
-            # Limita a lista de exercícios no prompt para economizar tokens e evitar alucinação
-            # Pega apenas os 300 primeiros exercícios ou os mais comuns
+            # --- BLINDAGEM RESTAURADA ---
+            # Removemos o limite [:300]. Agora a IA recebe a lista completa.
+            # Isso restaura a capacidade da IA de saber exatamente quais nomes usar.
             all_keys = list(cls._db.keys())
-            cls._keys_string = ", ".join(all_keys[:300]) 
+            cls._keys_string = ", ".join(all_keys) 
             
-            logger.info(f"✅ ExerciseRepository: {len(cls._db)} exercícios carregados (300 injetados no prompt).")
+            logger.info(f"✅ ExerciseRepository: {len(cls._db)} exercícios carregados (Blindagem Total Ativa: 100% injetados).")
             
         except json.JSONDecodeError:
             logger.error("❌ Erro de sintaxe no arquivo exercises.json")
@@ -432,7 +433,7 @@ class ExerciseRepository:
 
     @classmethod
     def get_keys_string(cls) -> str:
-        """Retorna a string formatada para injeção no prompt."""
+        """Retorna a string completa para injeção no prompt (Blindagem)."""
         return cls._keys_string
 
     @classmethod
@@ -802,7 +803,7 @@ class PDFReport(FPDF):
         self.ln(2)
 
 # ==============================================================================
-# SEÇÃO 12: HELPERS DE NEGÓCIO E VALIDAÇÃO PÓS-IA
+# SEÇÃO 12: HELPERS DE NEGÓCIO E VALIDAÇÃO PÓS-IA (BLINDAGEM REFORÇADA)
 # ==============================================================================
 
 def normalizar_texto(texto: str) -> str:
@@ -813,11 +814,14 @@ def normalizar_texto(texto: str) -> str:
 def validar_exercicios_final(treino_data: list) -> list:
     """
     Validação final pós-IA.
-    Tenta casar nomes de exercícios gerados com pastas de imagens locais para garantir que o frontend consiga exibir os GIFs/Imagens.
+    Esta função é o 'Shielding' (Blindagem) final.
+    Ela garante que qualquer nome gerado pela IA seja mapeado para uma pasta de imagem real existente no servidor.
+    Se a IA gerar um nome similar, o fuzzy matching corrige.
     """
     exercicios_db = ExerciseRepository.get_db()
     if not treino_data or not exercicios_db: return treino_data
     
+    # URL base para ativos estáticos
     base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
     
     # Mapas de busca O(1) para performance
@@ -835,29 +839,30 @@ def validar_exercicios_final(treino_data: list) -> list:
             path = None
             final_name = raw_name
             
-            # 1. Match Exato
+            # 1. Match Exato (Prioridade Máxima)
             if norm_name in db_map:
                 path = db_map[norm_name]
                 final_name = db_titles[norm_name]
             else:
-                # 2. Match por Similaridade (Fuzzy)
+                # 2. Match por Similaridade (Fuzzy Logic - Difflib)
+                # Tenta encontrar o nome mais próximo no banco
                 matches = difflib.get_close_matches(norm_name, db_map.keys(), n=1, cutoff=0.6)
                 if matches:
                     path = db_map[matches[0]]
                     final_name = db_titles[matches[0]]
                 else:
-                    # 3. Match por Substring (contém)
+                    # 3. Match por Substring (Fallback de contensão)
                     for k in db_map.keys():
                         if k in norm_name or norm_name in k:
                             path = db_map[k]
                             final_name = db_titles[k]
                             break
-                    # 4. Fallback Seguro
+                    # 4. Fallback Seguro (Último recurso)
                     if not path and "polichinelo" in db_map:
                         path = db_map["polichinelo"]
                         final_name = f"{raw_name} (Adaptado)"
 
-            # Atualiza objeto com nome padronizado e imagens
+            # Atualiza objeto com nome padronizado do banco e injeta as URLs das imagens
             ex['nome'] = str(final_name).title()
             if path:
                 ex['imagens_demonstracao'] = [
