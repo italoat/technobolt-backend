@@ -602,6 +602,9 @@ class AIOrchestrator:
                 
                 logger.warning(f"   ⚠️ Falha parcial: {model_name} (Key ...{api_key[-4:]}): {err_str[:100]}")
                 last_error = e
+                # --- CORREÇÃO DE SOBRECARGA DA IA ---
+                # Adiciona um pequeno delay antes de tentar a próxima chave para evitar spam na API
+                time.sleep(1.5) 
                 continue # Tenta próxima chave
                 
         # Se saiu do loop, falhou com todas as chaves
@@ -811,54 +814,67 @@ def normalizar_texto(texto: str) -> str:
     if not texto: return ""
     return "".join(c for c in unicodedata.normalize('NFD', str(texto)) if unicodedata.category(c) != 'Mn').lower().strip()
 
-def validar_e_corrigir_exercicios(lista_exercicios):
-    if not lista_exercicios or not EXERCISE_DB: return lista_exercicios
+def validar_exercicios_final(lista_exercicios):
+    """
+    Validação final pós-IA.
+    Mantém a lógica de URLs e blindagem de exercícios exatamente como solicitado.
+    """
+    exercicios_db = ExerciseRepository.get_db()
+    if not lista_exercicios or not exercicios_db: return lista_exercicios
     
-    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
+    base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
     
-    db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
-    db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
+    db_map_norm = {normalizar_texto(k): v for k, v in exercicios_db.items()}
+    db_title_map = {normalizar_texto(k): k for k, v in exercicios_db.items()}
 
-    for ex in lista_exercicios:
-        nome_ia = ex.get('nome', '')
-        nome_ia_norm = normalizar_texto(nome_ia)
+    for dia in lista_exercicios:
+        if 'exercicios' not in dia: continue
         
-        pasta_github = None
-        nome_final = nome_ia 
+        corrected_exs = []
+        for ex in dia['exercicios']:
+            nome_ia = ex.get('nome', '')
+            nome_ia_norm = normalizar_texto(nome_ia)
+            
+            pasta_github = None
+            nome_final = nome_ia 
 
-        if nome_ia_norm in db_map_norm:
-            pasta_github = db_map_norm[nome_ia_norm]
-            nome_final = db_title_map[nome_ia_norm].title()
-        else:
-            matches = difflib.get_close_matches(nome_ia_norm, db_map_norm.keys(), n=1, cutoff=0.6)
-            if matches:
-                match_key = matches[0]
-                pasta_github = db_map_norm[match_key]
-                nome_final = db_title_map[match_key].title()
+            if nome_ia_norm in db_map_norm:
+                pasta_github = db_map_norm[nome_ia_norm]
+                nome_final = db_title_map[nome_ia_norm].title()
             else:
-                melhor_candidato = None
-                for key in db_map_norm.keys():
-                    if (key in nome_ia_norm and len(key) > 4) or (nome_ia_norm in key and len(nome_ia_norm) > 4): 
-                        melhor_candidato = key
-                        break
-                
-                if melhor_candidato:
-                    pasta_github = db_map_norm[melhor_candidato]
-                    nome_final = db_title_map[melhor_candidato].title()
+                matches = difflib.get_close_matches(nome_ia_norm, db_map_norm.keys(), n=1, cutoff=0.6)
+                if matches:
+                    match_key = matches[0]
+                    pasta_github = db_map_norm[match_key]
+                    nome_final = db_title_map[match_key].title()
                 else:
-                    fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
-                    pasta_github = db_map_norm[fallback_key]
-                    nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
+                    melhor_candidato = None
+                    for key in db_map_norm.keys():
+                        if (key in nome_ia_norm and len(key) > 4) or (nome_ia_norm in key and len(nome_ia_norm) > 4): 
+                            melhor_candidato = key
+                            break
+                    
+                    if melhor_candidato:
+                        pasta_github = db_map_norm[melhor_candidato]
+                        nome_final = db_title_map[melhor_candidato].title()
+                    else:
+                        fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
+                        pasta_github = db_map_norm[fallback_key]
+                        nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
 
-        ex['nome'] = nome_final
+            ex['nome'] = nome_final
+            
+            if pasta_github:
+                ex['imagens_demonstracao'] = [
+                    f"{base_url}/{pasta_github}/0.jpg",
+                    f"{base_url}/{pasta_github}/1.jpg"
+                ]
+            else:
+                ex['imagens_demonstracao'] = [] 
+            
+            corrected_exs.append(ex)
         
-        if pasta_github:
-            ex['imagens_demonstracao'] = [
-                f"{base_url}/{pasta_github}/0.jpg",
-                f"{base_url}/{pasta_github}/1.jpg"
-            ]
-        else:
-            ex['imagens_demonstracao'] = [] 
+        dia['exercicios'] = corrected_exs
 
     return lista_exercicios
 
