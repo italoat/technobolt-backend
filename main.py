@@ -20,7 +20,7 @@ import difflib
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="91.1-Elite-Senior-Hotfix")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="91.2-Elite-Native-Types")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
 EXERCISE_KEYS = []
@@ -59,25 +59,22 @@ def get_database():
 
 db = get_database()
 
-# --- [SENIOR FIX] SANITIZAÇÃO GLOBAL DE TIPOS ---
-# Garante que o Flutter nunca receba um Double/Int/ObjectId onde espera String
+# --- SANITIZAÇÃO DE OBJETOS (PRESERVA TIPOS NATIVOS) ---
+# [MODIFICADO] Agora preserva int, float e bool. Apenas converte ObjectId para str.
 def preparar_resposta_frontend(data):
     """
-    Percorre qualquer estrutura (Dict, List, Valor) e converte 
-    forçadamente int/float e ObjectId para string, prevenindo crash no Flutter.
+    Percorre a estrutura e prepara para JSON.
+    Mantém tipos primitivos (int, float, bool, none) intactos.
+    Converte apenas ObjectId para string para permitir serialização.
     """
     if isinstance(data, dict):
         return {k: preparar_resposta_frontend(v) for k, v in data.items()}
     elif isinstance(data, list):
         return [preparar_resposta_frontend(v) for v in data]
-    elif isinstance(data, (int, float)):
-        return str(data) 
     elif isinstance(data, ObjectId):
-        return str(data) # [FIX] Tratamento essencial para IDs do Mongo
-    elif data is None:
-        return "" 
+        return str(data) # Necessário pois ObjectId não é serializável por padrão
     else:
-        return data
+        return data # Retorna int, float, str, None, bool como são
 
 # --- FUNÇÕES UTILITÁRIAS GERAIS ---
 
@@ -108,7 +105,6 @@ def rodar_ia(prompt, imagem_bytes=None):
 def limpar_e_parsear_json(texto_ia):
     try:
         # 1. Extração Robusta com Regex (Pega apenas o conteúdo entre chaves)
-        # Isso evita erros quando a IA coloca texto antes ou depois do JSON
         match = re.search(r'\{.*\}', texto_ia, re.DOTALL)
         if match:
             texto_limpo = match.group(0)
@@ -118,11 +114,11 @@ def limpar_e_parsear_json(texto_ia):
         # 2. Parseamento
         parsed = json.loads(texto_limpo)
         
-        # 3. Sanitização de Tipos (Blindagem para o Flutter)
+        # 3. Preparação para Frontend (Mantendo Tipos)
         return preparar_resposta_frontend(parsed)
     except Exception as e:
         print(f"Erro ao parsear JSON da IA: {e}")
-        # Retorno de fallback estruturado para não quebrar o app
+        # Retorno de fallback estruturado
         return preparar_resposta_frontend({
             "avaliacao": {"insight": "Houve uma instabilidade na análise detalhada, mas geramos um protocolo base de segurança."},
             "dieta": [],
@@ -373,8 +369,8 @@ def atualizar_perfil(dados: dict):
 async def executar_analise(
     usuario: str = Form(...),
     nome_completo: str = Form(...),
-    peso: str = Form(...), # Recebe string para tratar virgula/ponto
-    altura: str = Form(...), # Recebe string
+    peso: str = Form(...), 
+    altura: str = Form(...), 
     objetivo: str = Form(...),
     genero: str = Form("Masculino"),
     observacoes: str = Form(""), 
