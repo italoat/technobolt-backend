@@ -1,6 +1,6 @@
 """
 TechnoBolt Gym Hub API - Enterprise Edition
-Version: 108.1-Titanium-Fixed-Visual
+Version: 108.2-Titanium-Fixed-Final
 Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline & Multi-Level Rotation
 Copyright (c) 2026 TechnoBolt Solutions.
 """
@@ -148,7 +148,7 @@ class Settings:
         
         # Metadados da API
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "108.1-Titanium-Fixed-Visual"
+        self.API_VERSION = "108.2-Titanium-Fixed-Final"
         self.ENV = self._get_env("ENV", "production")
         
         # Carregamento dinâmico de chaves de API (Load Balancer)
@@ -820,7 +820,7 @@ def validar_exercicios_final(treino_data: list) -> list:
     exercicios_db = ExerciseRepository.get_db()
     if not treino_data or not exercicios_db: return treino_data
     
-    # URL base limpa (SEM MARKDOWN)
+    # URL CORRIGIDA (Versão 108.2) - Remove formatação Markdown para funcionar no app
     base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
     
     # Mapas de busca para performance e mapeamento reverso
