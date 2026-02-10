@@ -31,10 +31,10 @@ import pillow_heif
 # Geração de PDF
 from fpdf import FPDF
 
-# --- CONFIGURAÇÃO DE LOGGING ---
+# --- CONFIGURAÇÃO DE LOGGING (ENTERPRISE GRADE) ---
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger("TechnoBoltAPI")
@@ -44,15 +44,15 @@ pillow_heif.register_heif_opener()
 
 # --- CONFIGURAÇÕES DE AMBIENTE (SETTINGS) ---
 class Settings:
-    """Centraliza as configurações da aplicação."""
+    """Centraliza as configurações da aplicação e variáveis de ambiente."""
     MONGO_USER = os.environ.get("MONGO_USER", "technobolt")
     MONGO_PASS = os.environ.get("MONGO_PASS", "tech@132")
     MONGO_HOST = os.environ.get("MONGO_HOST", "cluster0.zbjsvk6.mongodb.net")
     DB_NAME = "technoboltgym"
     API_TITLE = "TechnoBolt Gym Hub API"
-    API_VERSION = "92.0-Enterprise-Opt"
+    API_VERSION = "93.0-Elite-Max-Performance"
     
-    # Rotação de chaves de API para balanceamento de carga
+    # Rotação de chaves de API para balanceamento de carga e alta disponibilidade
     GEMINI_KEYS = [
         os.environ.get(f"GEMINI_CHAVE_{i}") 
         for i in range(1, 8) 
@@ -71,6 +71,7 @@ MOTORES_TECHNOBOLT = [
 
 # --- CAMADA DE DADOS: CONEXÃO MONGODB ---
 class Database:
+    """Gerenciador Singleton de conexão com o Banco de Dados."""
     client: MongoClient = None
 
     @classmethod
@@ -79,7 +80,7 @@ class Database:
             password = urllib.parse.quote_plus(settings.MONGO_PASS)
             uri = f"mongodb+srv://{settings.MONGO_USER}:{password}@{settings.MONGO_HOST}/?appName=Cluster0"
             cls.client = MongoClient(uri)
-            # Teste de conexão (Ping)
+            # Teste de conexão (Ping) para garantir que o banco está vivo no startup
             cls.client.admin.command('ping')
             logger.info("✅ Conexão com MongoDB estabelecida com sucesso.")
         except Exception as e:
@@ -97,11 +98,10 @@ Database.connect()
 db = Database.get_db()
 
 # --- UTILITÁRIOS: PYOBJECTID (SERIALIZAÇÃO AUTOMÁTICA) ---
-# Isso substitui a função 'preparar_resposta_frontend' de forma nativa no Pydantic
 PyObjectId = Annotated[str, BeforeValidator(str)]
 
 class MongoModel(BaseModel):
-    """Classe base para modelos que usam ObjectId."""
+    """Classe base para modelos que usam ObjectId do MongoDB."""
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
 
     model_config = ConfigDict(
@@ -110,8 +110,7 @@ class MongoModel(BaseModel):
         json_encoders={ObjectId: str}
     )
 
-# --- MODELOS DE DADOS (SCHEMAS) ---
-# Aumenta a robustez e documentação da API
+# --- MODELOS DE DADOS (SCHEMAS ROBUSTOS) ---
 
 class UserLogin(BaseModel):
     usuario: str
@@ -156,42 +155,46 @@ class AdminUserEdit(BaseModel):
     status: Optional[str] = None
     creditos: Optional[int] = None
 
-# --- BANCO DE EXERCÍCIOS ---
+# --- BANCO DE EXERCÍCIOS (CARREGAMENTO E CACHE) ---
 EXERCISE_DB = {}
 EXERCISE_LIST_STRING = ""
 
 def carregar_exercicios():
+    """Carrega o JSON local de exercícios para memória para validação rápida."""
     global EXERCISE_DB, EXERCISE_LIST_STRING
     try:
         with open("exercises.json", "r", encoding="utf-8") as f:
             EXERCISE_DB = json.load(f)
             keys = list(EXERCISE_DB.keys())
+            # Convertemos para string para injetar no prompt da IA
             EXERCISE_LIST_STRING = ", ".join(keys)
-        logger.info(f"✅ Banco de Exercícios Carregado: {len(EXERCISE_DB)} itens.")
+        logger.info(f"✅ Banco de Exercícios Carregado: {len(EXERCISE_DB)} itens disponíveis para a IA.")
     except FileNotFoundError:
-        logger.warning("⚠️ Arquivo exercises.json não encontrado. Operando sem validação visual.")
+        logger.warning("⚠️ Arquivo exercises.json não encontrado. A API funcionará sem imagens de referência.")
     except Exception as e:
-        logger.error(f"⚠️ Erro ao carregar exercises.json: {e}")
+        logger.error(f"⚠️ Erro crítico ao carregar exercises.json: {e}")
 
 carregar_exercicios()
 
 # --- SERVIÇOS (LÓGICA DE NEGÓCIO) ---
 
 class AIService:
-    """Gerencia interações com a API do Gemini."""
+    """Gerencia interações com a API do Google Gemini com fallback e retry."""
     
     @staticmethod
     def _get_api_key():
         if not settings.GEMINI_KEYS:
-            logger.error("Nenhuma chave de API do Gemini configurada.")
+            logger.error("Nenhuma chave de API do Gemini configurada no ambiente.")
             return None
+        # Seleção aleatória para balanceamento simples
         key = random.choice(settings.GEMINI_KEYS)
         return key
 
     @staticmethod
     def generate_content(prompt: str, image_bytes: Optional[bytes] = None) -> Optional[str]:
         """
-        Executa uma requisição para a IA com retry e fallback de modelos.
+        Executa uma requisição para a IA.
+        Itera sobre modelos disponíveis em caso de falha.
         """
         api_key = AIService._get_api_key()
         if not api_key:
@@ -199,47 +202,48 @@ class AIService:
 
         img_blob = {"mime_type": "image/jpeg", "data": image_bytes} if image_bytes else None
         
-        # Configura cliente
         genai.configure(api_key=api_key)
         
         for modelo in MOTORES_TECHNOBOLT:
             try:
-                logger.info(f"🧠 Tentando inferência com modelo: {modelo}")
+                logger.info(f"🧠 [IA] Iniciando inferência com modelo: {modelo}")
                 model = genai.GenerativeModel(modelo)
                 
                 config = genai.types.GenerationConfig(
                     response_mime_type="application/json" if "json" in prompt.lower() else "text/plain",
-                    max_output_tokens=8192,
-                    temperature=0.7
+                    max_output_tokens=8192, # Tokens altos para permitir respostas longas (7 dias de dieta/treino)
+                    temperature=0.7 # Criatividade balanceada com precisão
                 )
                 
                 inputs = [prompt, img_blob] if img_blob else [prompt]
                 response = model.generate_content(inputs, generation_config=config)
                 
                 if response and response.text:
+                    logger.info(f"✅ [IA] Sucesso na geração com {modelo}")
                     return response.text
                     
             except Exception as e:
-                logger.warning(f"Falha no modelo {modelo}: {e}. Tentando próximo...")
+                logger.warning(f"⚠️ Falha no modelo {modelo}: {e}. Tentando próximo modelo...")
                 continue
                 
-        logger.error("❌ Todos os modelos de IA falharam.")
+        logger.error("❌ Todos os modelos de IA falharam. Serviço indisponível.")
         return None
 
 class ImageService:
-    """Utilitários para processamento de imagem."""
+    """Utilitários para processamento e otimização de imagens."""
     
     @staticmethod
     def optimize(file_bytes: bytes, quality: int = 70, size: tuple = (800, 800)) -> bytes:
         try:
             with Image.open(io.BytesIO(file_bytes)) as img:
-                # Corrige orientação baseada em EXIF
+                # Corrige orientação baseada em EXIF (comum em fotos de celular)
                 img = ImageOps.exif_transpose(img)
-                # Converte para RGB (remove alpha se houver)
+                
+                # Converte para RGB (remove alpha/transparência se houver)
                 if img.mode != 'RGB':
                     img = img.convert("RGB")
                 
-                # Redimensiona mantendo proporção
+                # Redimensiona mantendo proporção (thumbnail)
                 img.thumbnail(size)
                 
                 output = io.BytesIO()
@@ -247,15 +251,15 @@ class ImageService:
                 return output.getvalue()
         except Exception as e:
             logger.error(f"Erro ao otimizar imagem: {e}")
-            return file_bytes # Retorna original em caso de erro
+            return file_bytes # Retorna original em caso de erro para não quebrar fluxo
 
 class PDFService(FPDF):
-    """Gerador de relatórios PDF customizado."""
+    """Gerador de relatórios PDF customizado para a identidade visual TechnoBolt."""
     
     def __init__(self):
         super().__init__()
         self.set_auto_page_break(auto=True, margin=15)
-        # Paleta de Cores TechnoBolt
+        # Paleta de Cores TechnoBolt (Dark Theme)
         self.col_fundo = (20, 20, 25)
         self.col_card = (35, 35, 40)
         self.col_azul = (59, 130, 246)
@@ -266,16 +270,17 @@ class PDFService(FPDF):
     def sanitizar_texto(self, texto: Any) -> str:
         if not texto: return ""
         texto = str(texto)
+        # Mapeamento de emojis e caracteres especiais para ASCII/Latin-1
         subs = {
             "🚀": ">>", "✅": "[OK]", "⚠️": "[!]", 
             "💊": "", "🥗": "", "🏋️": "", "📊": "",
             "**": "", "###": "", "##": "", "–": "-", 
-            "“": '"', "”": '"'
+            "“": '"', "”": '"', "ç": "c", "ã": "a", "õ": "o", "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u"
         }
         for k, v in subs.items():
             texto = texto.replace(k, v)
         
-        # Tratamento de encoding para FPDF (Latin-1)
+        # Encoding agressivo para evitar crash do FPDF
         return texto.encode('latin-1', 'replace').decode('latin-1')
 
     def header(self):
@@ -330,17 +335,17 @@ class PDFService(FPDF):
 app = FastAPI(
     title=settings.API_TITLE,
     version=settings.API_VERSION,
-    description="Backend de alta performance para a plataforma TechnoBolt Gym Hub.",
+    description="Backend de alta performance para a plataforma TechnoBolt Gym Hub. Focado em hipertrofia e definição.",
     openapi_tags=[
         {"name": "Auth", "description": "Autenticação e Registro"},
         {"name": "Perfil", "description": "Gestão de Usuários"},
-        {"name": "Analise", "description": "Inteligência Artificial Generativa"},
+        {"name": "Analise", "description": "Inteligência Artificial Generativa - Protocolos"},
         {"name": "Social", "description": "Feed, Likes e Comentários"},
         {"name": "Admin", "description": "Painel Administrativo"},
     ]
 )
 
-# Configuração de CORS (Permitir acesso do Frontend)
+# Configuração de CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -349,25 +354,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- HELPERS DE LÓGICA ---
+# --- HELPERS DE LÓGICA DE NEGÓCIO ---
 
 def normalizar_texto(texto: str) -> str:
-    """Remove acentos e coloca em minúsculas para comparação."""
+    """Remove acentos e coloca em minúsculas para comparação robusta de strings."""
     if not texto: return ""
     if not isinstance(texto, str): texto = str(texto)
     return "".join(c for c in unicodedata.normalize('NFD', texto) 
                    if unicodedata.category(c) != 'Mn').lower().strip()
 
 def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
-    """Associa exercícios gerados pela IA com imagens do banco local."""
+    """
+    BLINDAGEM DO SISTEMA DE EXERCÍCIOS.
+    Garante que o exercício sugerido pela IA corresponda a uma imagem no banco local.
+    Usa correspondência exata, similaridade (difflib) e busca por substring.
+    """
     if not lista_exercicios or not EXERCISE_DB: 
         return lista_exercicios
     
     base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
     
-    # Mapas para busca O(1)
+    # Mapas para busca O(1) e recuperação do nome formatado
     db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
     db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
+
+    exercicios_corrigidos = []
 
     for ex in lista_exercicios:
         nome_ia = ex.get('nome', '')
@@ -381,7 +392,7 @@ def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
             pasta_github = db_map_norm[nome_ia_norm]
             nome_final = db_title_map[nome_ia_norm].title()
         else:
-            # 2. Match por Similaridade (Difflib)
+            # 2. Match por Similaridade (Difflib) - Corrige erros de digitação da IA
             matches = difflib.get_close_matches(nome_ia_norm, db_map_norm.keys(), n=1, cutoff=0.6)
             if matches:
                 match_key = matches[0]
@@ -400,10 +411,11 @@ def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
                     pasta_github = db_map_norm[melhor_candidato]
                     nome_final = db_title_map[melhor_candidato].title()
                 else:
-                    # 4. Fallback (Polichinelo)
+                    # 4. Fallback (Polichinelo) - Garante que não quebra, mas avisa
+                    # Em um sistema hardcore, poderíamos remover o exercício, mas substituiremos por um genérico seguro.
                     fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
                     pasta_github = db_map_norm[fallback_key]
-                    nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
+                    nome_final = f"{nome_ia} (Adaptado)"
 
         ex['nome'] = str(nome_final)
         
@@ -414,8 +426,10 @@ def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
             ]
         else:
             ex['imagens_demonstracao'] = [] 
+        
+        exercicios_corrigidos.append(ex)
 
-    return lista_exercicios
+    return exercicios_corrigidos
 
 def calcular_medalha(username: str) -> str:
     """Calcula a medalha do usuário baseada em pontos (Gamification)."""
@@ -431,22 +445,25 @@ def calcular_medalha(username: str) -> str:
         return ""
 
 def limpar_e_parsear_json(texto_ia: str) -> dict:
-    """Extrai e valida JSON de uma resposta de texto da IA."""
+    """
+    Parser robusto para extrair JSON de respostas da IA.
+    Lida com blocos de código Markdown e texto introdutório.
+    """
     try:
-        # Regex para extrair apenas o objeto JSON {}
+        # Regex para extrair apenas o objeto JSON {} mais externo
         match = re.search(r'\{.*\}', texto_ia, re.DOTALL)
         if match:
             texto_limpo = match.group(0)
         else:
-            # Fallback de limpeza manual
+            # Fallback de limpeza manual se o Regex falhar
             texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
 
         parsed = json.loads(texto_limpo)
-        return parsed # Retorna tipos nativos (int, float, etc.)
+        return parsed 
         
     except json.JSONDecodeError as e:
-        logger.error(f"Erro de parse JSON: {e}")
-        # Retorna estrutura de segurança
+        logger.error(f"Erro de parse JSON: {e}. Texto recebido: {texto_ia[:200]}...")
+        # Retorna estrutura de segurança para não quebrar o frontend
         return {
             "avaliacao": {"insight": "Houve uma instabilidade na análise, mas geramos um protocolo base."},
             "dieta": [],
@@ -465,10 +482,8 @@ def login(dados: UserLogin):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciais inválidas")
     
     if user.get("status") != "ativo" and not user.get("is_admin"):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Sua conta aguarda ativação.")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Sua conta aguarda ativação pelo administrador.")
     
-    # Monta resposta manualmente para garantir estrutura
-    # O PyObjectId lida com a serialização do ID se necessário
     return {
         "sucesso": True,
         "dados": {
@@ -509,7 +524,6 @@ def registrar(dados: UserRegister):
 @app.post("/perfil/atualizar", tags=["Perfil"])
 def atualizar_perfil(dados: UserUpdate):
     """Atualiza informações cadastrais do usuário."""
-    # Filtra apenas campos não nulos
     update_data = {k: v for k, v in dados.model_dump(exclude={'usuario'}).items() if v is not None}
     
     result = db.usuarios.update_one({"usuario": dados.usuario}, {"$set": update_data})
@@ -519,7 +533,7 @@ def atualizar_perfil(dados: UserUpdate):
         
     return {"sucesso": True}
 
-# --- ROTAS: ANÁLISE IA ---
+# --- ROTAS: ANÁLISE IA (CORE) ---
 
 @app.post("/analise/executar", tags=["Analise"])
 async def executar_analise(
@@ -532,27 +546,30 @@ async def executar_analise(
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
-    """Gera um protocolo completo de treino e dieta usando IA."""
+    """
+    GERADOR DE PROTOCOLO MASTER.
+    Esta função coordena a análise biométrica, dietética e de treinamento.
+    Utiliza prompts avançados para garantir volume de treino e adesão à dieta.
+    """
     
-    # 1. Tratamento e Validação de Inputs
+    # 1. Tratamento e Validação de Inputs com Fallback
     try:
         peso_clean = str(peso).replace(',', '.')
         peso_float = float(peso_clean)
         
         altura_clean = str(altura).replace(',', '.').replace('cm', '').strip()
         altura_val = float(altura_clean)
-        # Normaliza altura para cm
         if altura_val < 3.0: 
              altura_int = int(altura_val * 100)
         else:
              altura_int = int(altura_val)
              
     except ValueError:
-        logger.warning(f"Erro ao converter medidas para user {usuario}. Usando padrão.")
+        logger.warning(f"Erro ao converter medidas para user {usuario}. Usando valores padrão seguros.")
         peso_float = 70.0 
         altura_int = 175
 
-    # 2. Atualiza dados básicos no banco
+    # 2. Atualiza dados básicos no banco para persistência
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
@@ -564,7 +581,7 @@ async def executar_analise(
         }}
     )
 
-    # 3. Busca contexto existente
+    # 3. Busca contexto existente (histórico médico/restrições)
     user_data = db.usuarios.find_one({"usuario": usuario})
     if not user_data:
         raise HTTPException(404, "Usuário não encontrado após update.")
@@ -574,87 +591,109 @@ async def executar_analise(
     r_f = user_data.get('restricoes_fis', 'Nenhuma')
     info = observacoes 
 
-    # 4. Processamento de Imagem
+    # 4. Processamento de Imagem (Compressão e Otimização para a IA)
     content = await foto.read()
     img_otimizada = ImageService.optimize(content, quality=85, size=(800, 800))
     
     altura_m = altura_int / 100 if altura_int > 0 else 1.70
     imc = peso_float / (altura_m**2)
     
-    # 5. Engenharia de Prompt (Otimizado)
+    # 5. ENGENHARIA DE PROMPT (SENIOR LEVEL)
+    # O prompt abaixo é estruturado para forçar a IA a agir como especialista e seguir restrições estritas.
+    
     prompt_mestre = f"""
-    VOCÊ É UM TREINADOR DE ELITE E NUTRICIONISTA PhD.
-    SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO PARA MAXIMIZAR RESULTADOS (Hipertrofia/Definição).
+    ROLE: YOU ARE A HARDCORE ELITE BODYBUILDING COACH AND PHD NUTRITIONIST.
+    YOUR MISSION: CREATE THE ULTIMATE TRANSFORMATION PROTOCOL FOR THIS CLIENT. NO MEDIOCRITY.
     
-    PERFIL: {nome_completo}, {genero}, {peso_float}kg, {altura_int}cm, IMC {imc:.2f}.
-    OBJETIVO: {objetivo}.
-    RESTRIÇÕES: Alimentares: "{r_a}", Físicas: "{r_f}", Meds: "{r_m}", Obs: "{info}".
-
-    REGRAS ESTRITAS DE OUTPUT (JSON APENAS):
+    CLIENT PROFILE:
+    - Name: {nome_completo}
+    - Gender: {genero}
+    - Stats: {peso_float}kg, {altura_int}cm, BMI {imc:.2f}
+    - GOAL: {objetivo} (Prioritize this above all)
     
-    1. **TREINO (INDIVIDUALIZADO):**
-       - Use APENAS exercícios desta lista: [ {EXERCISE_LIST_STRING} ]
-       - Se o exercício ideal não estiver na lista, escolha a variação mais próxima da lista.
-       - Estrutura: "dia", "foco", e lista de "exercicios".
-       - DENTRO DE CADA EXERCÍCIO, adicione o campo "justificativa_individual": Explique de forma individualizada, biomecanicamente, porque este exercício foi escolhido para ESTA pessoa.
-       - Campo "execucao": Detalhe técnico.
-       - "treino_insight": Explique sobre o porque montou o treino em questão para a pessoa, focando na estratégia adotada.
+    CRITICAL RESTRICTIONS (MUST OBEY):
+    - Food Allergies/Restrictions: "{r_a}"
+    - Physical Injuries/Restrictions: "{r_f}" (ADJUST TRAINING TO AVOID AGGRAVATING THESE)
+    - Medications: "{r_m}"
+    - Extra Context: "{info}"
 
-    2. **DIETA (SUPERÁVIT CALÓRICO/BULKING LIMPO):**
-       - Calcule o Gasto Energético Total (GET) estimado.
-       - APLIQUE UM SUPERÁVIT CALÓRICO de +300 a +500 kcal (mostre a matemática no insight).
-       - Preencha 'macros_totais' explicitando o superávit (ex: "3200kcal (Superávit) | P: 180g...").
-       - "dieta_insight": Explique o cálculo do superávit para suportar o anabolismo, mostrando os números base.
+    --- INSTRUCTIONS FOR JSON OUTPUT ---
+    
+    1. **DIET PLAN (MONDAY TO FRIDAY):**
+       - DO NOT summarize. Generate a UNIQUE menu for EACH DAY from Monday to Friday.
+       - Focus on nutrient timing and macronutrient maximization for the goal.
+       - Structure: Array of objects, each with "dia", "foco_nutricional", "refeicoes" list, and "macros_totais".
+       - "dieta_insight": Explain the caloric strategy (Surplus/Deficit) and why.
 
-    3. **RETORNO JSON PURO:** Sem markdown (```json), sem texto antes ou depois.
+    2. **TRAINING PLAN (MONDAY TO SUNDAY - 7 DAYS):**
+       - **MANDATORY:** YOU MUST GENERATE A PLAN FOR **ALL 7 DAYS** (Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday).
+       - **VOLUME RULE:** EACH WORKOUT SESSION MUST HAVE A **MINIMUM OF 10 EXERCISES**. NO LESS.
+       - **DATABASE CONSTRAINT:** YOU MUST ONLY USE EXERCISES FROM THIS LIST: [ {EXERCISE_LIST_STRING} ]
+         - If the perfect exercise isn't listed, pick the closest variation from the list. 
+         - DO NOT HALLUCINATE EXERCISES.
+       - **Structure:** Array of objects. Each object represents a day.
+       - **Individualization:** For each exercise, provide a "justificativa_individual" explaining why it fits THIS specific user's goal and limitations.
+       - "treino_insight": Explain the periodization strategy used (Push/Pull/Legs, Upper/Lower, etc.).
 
-    ESTRUTURA JSON OBRIGATÓRIA:
+    3. **OUTPUT FORMAT:**
+       - Return ONLY valid JSON. No Markdown formatting like ```json. No intro text.
+       - Ensure no null values. Fill everything with expert advice.
+
+    --- JSON SCHEMA ---
     {{
       "avaliacao": {{
-        "segmentacao": {{ "tronco": "...", "superior": "...", "inferior": "..." }},
-        "dobras": {{ "abdominal": "...", "suprailiaca": "...", "peitoral": "..." }},
-        "analise_postural": "...",
-        "simetria": "...",
-        "insight": "..."
+        "segmentacao": {{ "tronco": "Txt", "superior": "Txt", "inferior": "Txt" }},
+        "dobras": {{ "abdominal": "Txt", "suprailiaca": "Txt", "peitoral": "Txt" }},
+        "analise_postural": "Txt",
+        "simetria": "Txt",
+        "insight": "Txt"
       }},
       "dieta": [
         {{
             "dia": "Segunda-feira",
-            "foco_nutricional": "...",
-            "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ],
-            "macros_totais": "..."
-        }}
+            "foco_nutricional": "High Carb / Low Fat",
+            "refeicoes": [ 
+                {{ "horario": "08:00", "nome": "Café da Manhã", "alimentos": "3 Ovos, 100g Aveia..." }} 
+            ],
+            "macros_totais": "2500kcal | P: 180g | C: 300g | G: 60g"
+        }},
+        ... (REPEAT FOR TERÇA, QUARTA, QUINTA, SEXTA, SÁBADO, DOMINGO) ...
       ],
-      "dieta_insight": "...",
-      "suplementacao": [ {{ "nome": "...", "dose": "...", "horario": "...", "motivo": "..." }} ],
-      "suplementacao_insight": "...",
+      "dieta_insight": "Txt",
+      "suplementacao": [ {{ "nome": "Creatina", "dose": "5g", "horario": "Pós-treino", "motivo": "Txt" }} ],
+      "suplementacao_insight": "Txt",
       "treino": [
         {{
           "dia": "Segunda-feira",
-          "foco": "...",
+          "foco": "Peito e Tríceps (Exemplo)",
           "exercicios": [
             {{ 
-               "nome": "NOME EXATO DA LISTA", 
-               "series_reps": "...",
-               "execucao": "...",
-               "justificativa_individual": "..." 
-            }}
+               "nome": "EXACT_NAME_FROM_LIST", 
+               "series_reps": "4x12",
+               "execucao": "Txt description",
+               "justificativa_individual": "Selected because..." 
+            }},
+            ... (MINIMUM 10 EXERCISES HERE) ...
           ],
-          "treino_alternativo": "...",
-          "justificativa": "..."
-        }}
+          "treino_alternativo": "Cardio 30min",
+          "justificativa": "Txt"
+        }},
+        ... (REPEAT FOR TERÇA, QUARTA, QUINTA, SEXTA, SÁBADO, DOMINGO) ...
       ],
-      "treino_insight": "..."
+      "treino_insight": "Txt"
     }}
     """
     
+    # Executa IA
     resultado_raw = AIService.generate_content(prompt_mestre, img_otimizada)
     if not resultado_raw: 
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Serviço de IA Indisponível.")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Serviço de IA Indisponível no momento. Tente novamente.")
 
+    # Parseia JSON
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
-    # 6. Pós-processamento e Validação de Exercícios
+    # 6. Pós-processamento e Blindagem de Exercícios
+    # Garante que os nomes dos exercícios batam com o banco local para exibir imagens
     if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
         for dia in conteudo_json['treino']:
             # Limpa nome do dia
@@ -665,12 +704,13 @@ async def executar_analise(
             if 'exercicios' in dia and isinstance(dia['exercicios'], list):
                 dia['exercicios'] = validar_e_corrigir_exercicios(dia['exercicios'])
 
-    # 7. Persistência
+    # 7. Persistência do Dossiê
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "peso_reg": peso_float,
         "conteudo_bruto": {
             "json_full": conteudo_json,
+            # Mantém compatibilidade com versões antigas do app que buscam strings r1..r4
             "r1": str(conteudo_json.get('avaliacao', {}).get('insight', '')),
             "r2": str(conteudo_json.get('dieta_insight', '')),
             "r3": str(conteudo_json.get('suplementacao_insight', '')),
@@ -685,12 +725,14 @@ async def executar_analise(
         
     db.usuarios.update_one({"usuario": usuario}, update_query)
     
-    # Retorna tipos nativos (Pydantic/FastAPI serializa automaticamente)
     return {"sucesso": True, "resultado": dossie}
 
 @app.post("/analise/regenerar-secao", tags=["Analise"])
 def regenerar_secao(dados: dict = Body(...)):
-    """Regenera uma parte específica do protocolo (ex: Dieta de Terça)."""
+    """
+    Regenera uma parte específica do protocolo.
+    Mantém a consistência de volume (10 exercícios) e dias (Segunda-Sexta ou Domingo).
+    """
     usuario = dados.get("usuario")
     secao = dados.get("secao")
     dia_alvo = dados.get("dia") 
@@ -701,7 +743,6 @@ def regenerar_secao(dados: dict = Body(...)):
     user_data = db.usuarios.find_one({"usuario": usuario})
     if not user_data: return {"sucesso": False, "mensagem": "Usuário não encontrado."}
     
-    # Validação de Saldo
     creditos = user_data.get('avaliacoes_restantes', 0)
     is_admin = user_data.get('is_admin', False)
 
@@ -721,65 +762,62 @@ def regenerar_secao(dados: dict = Body(...)):
     
     prompt_regeneracao = ""
 
-    # Lógica de Prompt Específico
+    # Lógica de Prompt Específico para Regeneração
     if dia_alvo and secao in ["dieta", "treino"]:
         # --- REFRESH DE DIA ÚNICO ---
         if secao == "treino":
             prompt_regeneracao = f"""
-            ATENÇÃO: Treinador de Elite TechnoBolt.
-            TAREFA: Reescrever APENAS o dia '{dia_alvo}' da seção 'TREINO' para o atleta {nome}.
-            CONTEXTO: Restrições: {r_f}. Obs: {obs}.
+            ROLE: Elite Fitness Coach.
+            TASK: Rewrite ONLY the workout for '{dia_alvo}' for client {nome}.
+            CONTEXT: Physical Restrictions: {r_f}. Goal: Maximize Hypertrophy.
             
-            REGRA CRÍTICA:
-            1. USE **APENAS** EXERCÍCIOS DESTA LISTA: [ {EXERCISE_LIST_STRING} ]
-            2. VOLUME ALTO: Gere entre **6 a 9 exercícios**.
-            3. Título do dia: APENAS "{dia_alvo}".
-            4. JUSTIFICATIVA INDIVIDUAL: Explique porque escolheu este exercício para a pessoa.
+            CRITICAL RULES:
+            1. DATABASE CONSTRAINT: ONLY use exercises from: [ {EXERCISE_LIST_STRING} ]
+            2. HIGH VOLUME: Generate a MINIMUM of 10 EXERCISES for this session.
+            3. Structure: JSON Object for the day.
             
-            RETORNE APENAS O JSON DO OBJETO DO DIA:
+            JSON OUTPUT:
             {{ 
               "dia": "{dia_alvo}", 
-              "foco": "...", 
+              "foco": "Target Muscle Group", 
               "exercicios": [
-                {{ "nome": "...", "series_reps": "...", "execucao": "...", "justificativa_individual": "..." }}
+                {{ "nome": "EXACT_DB_NAME", "series_reps": "4x12", "execucao": "Txt", "justificativa_individual": "Txt" }},
+                ... (At least 9 more) ...
               ], 
-              "treino_alternativo": "...",
-              "justificativa": "..."
+              "treino_alternativo": "Txt",
+              "justificativa": "Txt"
             }}
             """
         else: # Dieta
              prompt_regeneracao = f"""
-            ATENÇÃO: Nutricionista de Elite TechnoBolt.
-            TAREFA: Reescrever a DIETA de '{dia_alvo}' para {nome}.
-            CONTEXTO: {r_a}.
-            REGRAS: 
-            1. NÃO retorne campos nulos. 
-            2. MANTENHA O SUPERÁVIT CALÓRICO calculado anteriormente.
-            3. Preencha 'macros_totais'.
+            ROLE: Elite Nutritionist.
+            TASK: Rewrite the diet plan for '{dia_alvo}' for client {nome}.
+            CONTEXT: Allergies: {r_a}.
             
-            RETORNE APENAS O JSON DO DIA:
-            {{ "dia": "{dia_alvo}", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "P: Xg | C: Yg | G: Zg" }}
+            JSON OUTPUT:
+            {{ 
+                "dia": "{dia_alvo}", 
+                "foco_nutricional": "Txt", 
+                "refeicoes": [ ...list of meals... ], 
+                "macros_totais": "P: Xg | C: Yg | G: Zg" 
+            }}
             """
     else:
         # Refresh Seção Completa
         prompt_regeneracao = f"""
-        ATENÇÃO: Treinador de Elite TechnoBolt.
-        TAREFA: Refresh COMPLETO da seção '{secao.upper()}' para {nome}.
-        CONTEXTO: {r_f}, {r_a}, {obs}.
-        LISTA DE EXERCÍCIOS PERMITIDOS: [ {EXERCISE_LIST_STRING if secao == 'treino' else ''} ]
+        ROLE: Elite Coach/Nutritionist.
+        TASK: Completely regenerate the section '{secao.upper()}' for {nome}.
+        CONTEXT: {r_f}, {r_a}, {obs}.
         
-        REGRAS: 
-        - 7 Dias. 
-        - VOLUME DE TREINO: 6 a 9 exercícios por dia.
-        - Sem dados nulos. 
-        - Títulos dos dias apenas o nome da semana.
-        - Se for dieta, inclua 'macros_totais' com SUPERÁVIT CALÓRICO.
-        - Se for treino, inclua 'justificativa_individual' nos exercícios.
-        RETORNE JSON: {{ "{secao}": [ ... ] }}
+        RULES:
+        - DIET: Generate menus for MONDAY to FRIDAY.
+        - WORKOUT: Generate plans for MONDAY to SUNDAY. Minimum 10 exercises per day. Use DB: [ {EXERCISE_LIST_STRING if secao == 'treino' else ''} ]
+        
+        RETURN JSON: {{ "{secao}": [ ... ] }}
         """
 
     resultado_texto = AIService.generate_content(prompt_regeneracao)
-    if not resultado_texto: return {"sucesso": False, "mensagem": "Erro IA."}
+    if not resultado_texto: return {"sucesso": False, "mensagem": "Erro na IA ao regenerar."}
 
     novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
@@ -843,7 +881,6 @@ def buscar_historico(usuario: str):
     user = db.usuarios.find_one({"usuario": usuario})
     if not user: return {"sucesso": True, "historico": []}
     
-    # Retorna tipos nativos (int, float) sem converter para string
     return {
         "sucesso": True, 
         "historico": user.get('historico_dossies', []), 
