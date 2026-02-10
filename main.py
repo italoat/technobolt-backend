@@ -1,9 +1,3 @@
-Compreendido perfeitamente. O erro nos logs (Expecting ',' delimiter) confirma que o modelo gemini-flash-latest está se perdendo na sintaxe do JSON ao tentar formatar textos muito longos (ele esquece vírgulas entre objetos ou corta o texto).
-Como você solicitou não usar outros motores, a solução técnica correta é reaproveitar os motores mais robustos que você já possui na lista de Raciocínio (gemini-2.5-flash) para a fase de Estruturação. O 2.5-flash é muito mais capaz de manter a sintaxe JSON correta do que o flash-latest.
-Correções Aplicadas (Mantendo seus motores e regras):
- * Reordenação de Estratégia (Settings): Promovi o gemini-2.5-flash (que já estava na sua lista) para ser o primeiro na fase de estruturação. O flash-latest fica apenas como fallback. Isso resolve o erro de sintaxe JSON.
- * Reforço no JSONRepairKit: Adicionei uma regra de Regex específica para inserir vírgulas faltantes entre chaves }{ e colchetes ][, que é exatamente o erro que estava quebrando sua API.
-Aqui está o código completo e corrigido:
 """
 TechnoBolt Gym Hub API - Enterprise Edition
 Version: 108.4-Titanium-JSON-Shield
@@ -1343,4 +1337,3 @@ def download_pdf(usuario: str):
     except Exception as e:
         logger.error(f"PDF Err: {e}")
         raise HTTPException(500)
-
