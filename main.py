@@ -51,7 +51,7 @@ class Settings:
     MONGO_HOST = os.environ.get("MONGO_HOST", "cluster0.zbjsvk6.mongodb.net")
     DB_NAME = "technoboltgym"
     API_TITLE = "TechnoBolt Gym Hub API"
-    API_VERSION = "96.0-Elite-Senior-Final"
+    API_VERSION = "97.5-Elite-Senior-Final"
     
     # Rotação de chaves de API para balanceamento de carga
     GEMINI_KEYS = [
@@ -180,19 +180,37 @@ carregar_exercicios()
 # --- SERVIÇOS (LÓGICA DE NEGÓCIO) ---
 
 def reparar_json_quebrado(texto: str) -> str:
-    """Tenta consertar erros comuns de JSON gerados por LLMs em textos longos."""
-    # Remove vírgulas trailing em listas e objetos (ex: [1, 2,] -> [1, 2])
+    """
+    Tenta consertar erros comuns de JSON gerados por LLMs em textos longos.
+    Resolve o erro "Expecting ',' delimiter" e JSONs truncados.
+    """
+    # 1. Remove caracteres de formatação Markdown extras no início/fim
+    texto = texto.strip()
+    if texto.startswith("```json"):
+        texto = texto[7:]
+    if texto.endswith("```"):
+        texto = texto[:-3]
+    texto = texto.strip()
+
+    # 2. Remove vírgulas trailing em listas e objetos (ex: [1, 2,] -> [1, 2])
+    # Regex melhorada para pegar vírgula seguida de espaço e fechamento
     texto = re.sub(r',\s*([\]}])', r'\1', texto)
     
-    # Tenta fechar chaves ou colchetes se o texto foi cortado (truncado)
-    # Isso é comum se o output exceder max_tokens
-    abertos_chave = texto.count('{') - texto.count('}')
-    if abertos_chave > 0:
-        texto += '}' * abertos_chave
-        
-    abertos_colchete = texto.count('[') - texto.count(']')
-    if abertos_colchete > 0:
-        texto += ']' * abertos_colchete
+    # 3. Balanceamento de chaves e colchetes (caso o texto tenha sido cortado por limite de tokens)
+    # Conta aberturas e fechamentos
+    count_brace_open = texto.count('{')
+    count_brace_close = texto.count('}')
+    count_bracket_open = texto.count('[')
+    count_bracket_close = texto.count(']')
+
+    # Fecha estruturas abertas na ordem inversa (simplificado)
+    # Normalmente JSONs de IA terminam abruptamente dentro de uma estrutura.
+    # Adicionamos fechamentos conservadores.
+    if count_brace_open > count_brace_close:
+        texto += '}' * (count_brace_open - count_brace_close)
+    
+    if count_bracket_open > count_bracket_close:
+        texto += ']' * (count_bracket_open - count_bracket_close)
         
     return texto
 
@@ -202,8 +220,7 @@ def limpar_e_parsear_json(texto_ia: str) -> dict:
     Lida com blocos de código Markdown, texto introdutório e erros de sintaxe.
     """
     try:
-        # 1. Extração do bloco JSON usando Regex (Do primeiro '{' ao último '}')
-        # O re.DOTALL permite que o ponto (.) case com quebras de linha
+        # 1. Tenta extrair o bloco JSON usando Regex (Do primeiro '{' ao último '}')
         match = re.search(r'\{.*\}', texto_ia, re.DOTALL)
         
         if match:
@@ -222,7 +239,7 @@ def limpar_e_parsear_json(texto_ia: str) -> dict:
             texto_reparado = reparar_json_quebrado(texto_limpo)
             return json.loads(texto_reparado)
         except json.JSONDecodeError as e2:
-            logger.error(f"❌ Falha no reparo JSON. Erro: {e2}")
+            logger.error(f"❌ Falha no reparo JSON. Texto problemático (início): {texto_ia[:100]}... Erro: {e2}")
             # Re-lança para que o mecanismo de Retry tente outro modelo/prompt
             raise e2
 
@@ -260,7 +277,7 @@ class AIService:
                 config = genai.types.GenerationConfig(
                     response_mime_type="application/json", 
                     max_output_tokens=8192,
-                    temperature=0.7 if attempt == 0 else 0.4 # Reduz criatividade nos retries para focar em sintaxe
+                    temperature=0.6 if attempt == 0 else 0.3 # Reduz criatividade nos retries
                 )
                 
                 inputs = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}] if image_bytes else [prompt]
@@ -295,7 +312,7 @@ class AIService:
         try:
             api_key = AIService._get_api_key()
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1]) # Usa o último modelo (stable) para tarefas simples
+            model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1]) # Usa o último modelo da lista
             
             inputs = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}] if image_bytes else [prompt]
             response = model.generate_content(inputs)
@@ -435,7 +452,7 @@ def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
     if not lista_exercicios or not EXERCISE_DB: 
         return lista_exercicios
     
-    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
+    base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
     
     db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
     db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
@@ -639,8 +656,8 @@ async def executar_analise(
 
     --- INSTRUCTIONS FOR JSON OUTPUT ---
     
-    1. **DIET PLAN (MONDAY TO FRIDAY):**
-       - DO NOT summarize. Generate a UNIQUE menu for EACH DAY from Monday to Friday.
+    1. **DIET PLAN (MONDAY TO SUNDAY - 7 DAYS):**
+       - DO NOT summarize. Generate a UNIQUE menu for EACH DAY from Monday to Sunday.
        - Focus on nutrient timing and macronutrient maximization for the goal.
        - Structure: Array of objects, each with "dia", "foco_nutricional", "refeicoes" list, and "macros_totais".
        - "dieta_insight": Explain the caloric strategy (Surplus/Deficit) and why.
@@ -679,7 +696,7 @@ async def executar_analise(
             ],
             "macros_totais": "2500kcal | P: 180g | C: 300g | G: 60g"
         }},
-        ... (REPEAT FOR TERÇA, QUARTA, QUINTA, SEXTA, SABADO, DOMINGO) ...
+        ... (REPEAT FOR TERÇA, QUARTA, QUINTA, SEXTA, SÁBADO, DOMINGO) ...
       ],
       "dieta_insight": "Txt",
       "suplementacao": [ {{ "nome": "Creatina", "dose": "5g", "horario": "Pós-treino", "motivo": "Txt" }} ],
@@ -706,7 +723,7 @@ async def executar_analise(
     }}
     """
     
-    # Executa IA com Retry Automático para garantir JSON válido
+    # Executa IA com Retry Automático
     conteudo_json = AIService.generate_valid_json(prompt_mestre, img_otimizada)
 
     # 6. Pós-processamento e Blindagem de Exercícios
@@ -793,7 +810,7 @@ def regenerar_secao(dados: dict = Body(...)):
                 {{ "nome": "EXACT_DB_NAME", "series_reps": "4x12", "execucao": "Txt", "justificativa_individual": "Txt" }},
                 ... (At least 9 more) ...
               ], 
-              "treino_alternativo": "Txt",
+              "treino_alternativo": "Txt", 
               "justificativa": "Txt"
             }}
             """
@@ -819,7 +836,7 @@ def regenerar_secao(dados: dict = Body(...)):
         CONTEXT: {r_f}, {r_a}, {obs}.
         
         RULES:
-        - DIET: Generate menus for MONDAY to FRIDAY.
+        - DIET: Generate menus for MONDAY to SUNDAY (7 DAYS).
         - WORKOUT: Generate plans for MONDAY to SUNDAY. Minimum 10 exercises per day. Use DB: [ {EXERCISE_LIST_STRING if secao == 'treino' else ''} ]
         
         RETURN JSON: {{ "{secao}": [ ... ] }}
@@ -938,7 +955,6 @@ async def postar_feed(
     post_id = db.posts.insert_one(post_doc).inserted_id
 
     # Comentário automático (simples string, usa generate_content direto)
-    # Aqui usamos uma versão simplificada do método de IA pois não é JSON
     try:
         genai.configure(api_key=AIService._get_api_key())
         model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1])
