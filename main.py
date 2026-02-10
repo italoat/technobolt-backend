@@ -20,7 +20,7 @@ import difflib
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="91.0-Elite-Senior-Fix")
+app = FastAPI(title="TechnoBolt Gym Hub API", version="91.1-Elite-Senior-Hotfix")
 
 # --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
 EXERCISE_KEYS = []
@@ -64,7 +64,7 @@ db = get_database()
 def preparar_resposta_frontend(data):
     """
     Percorre qualquer estrutura (Dict, List, Valor) e converte 
-    forçadamente int/float/ObjectId para string, prevenindo crash no Flutter.
+    forçadamente int/float e ObjectId para string, prevenindo crash no Flutter.
     """
     if isinstance(data, dict):
         return {k: preparar_resposta_frontend(v) for k, v in data.items()}
@@ -73,7 +73,7 @@ def preparar_resposta_frontend(data):
     elif isinstance(data, (int, float)):
         return str(data) 
     elif isinstance(data, ObjectId):
-        return str(data)
+        return str(data) # [FIX] Tratamento essencial para IDs do Mongo
     elif data is None:
         return "" 
     else:
@@ -438,7 +438,7 @@ async def executar_analise(
        - Campo "execucao": Detalhe técnico.
        - "treino_insight": Explique sobre o porque montou o treino em questão para a pessoa, focando na estratégia adotada.
 
-    2. **DIETA (SUPERÁVIT CALÓRICO):**
+    2. **DIETA (SUPERÁVIT CALÓRICO/BULKING LIMPO):**
        - Calcule o Gasto Energético Total (GET) estimado.
        - APLIQUE UM SUPERÁVIT CALÓRICO de +300 a +500 kcal (mostre a matemática no insight).
        - Preencha 'macros_totais' explicitando o superávit (ex: "3200kcal (Superávit) | P: 180g...").
