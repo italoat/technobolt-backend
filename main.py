@@ -1,41 +1,65 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import StreamingResponse
-from pymongo import MongoClient
-from bson.objectid import ObjectId
-import google.generativeai as genai
-from PIL import Image, ImageOps
-import io
 import os
+import io
 import re
 import json
-import urllib.parse
-from datetime import datetime
 import base64
 import random
-import pillow_heif
-from fpdf import FPDF
-import unicodedata
+import logging
 import difflib
+import urllib.parse
+import unicodedata
+from datetime import datetime
+from typing import List, Optional, Any, Dict, Union
+
+# Frameworks e Utilitários
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, status, Body
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
+from typing_extensions import Annotated
+
+# Banco de Dados
+from pymongo import MongoClient, ASCENDING, DESCENDING
+from bson.objectid import ObjectId
+from pymongo.errors import PyMongoError
+
+# IA e Processamento de Imagem
+import google.generativeai as genai
+from PIL import Image, ImageOps
+import pillow_heif
+
+# Geração de PDF
+from fpdf import FPDF
+
+# --- CONFIGURAÇÃO DE LOGGING ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("TechnoBoltAPI")
 
 # --- INICIALIZAÇÃO DE SUPORTE HEIC ---
 pillow_heif.register_heif_opener()
 
-app = FastAPI(title="TechnoBolt Gym Hub API", version="91.2-Elite-Native-Types")
+# --- CONFIGURAÇÕES DE AMBIENTE (SETTINGS) ---
+class Settings:
+    """Centraliza as configurações da aplicação."""
+    MONGO_USER = os.environ.get("MONGO_USER", "technobolt")
+    MONGO_PASS = os.environ.get("MONGO_PASS", "tech@132")
+    MONGO_HOST = os.environ.get("MONGO_HOST", "cluster0.zbjsvk6.mongodb.net")
+    DB_NAME = "technoboltgym"
+    API_TITLE = "TechnoBolt Gym Hub API"
+    API_VERSION = "92.0-Enterprise-Opt"
+    
+    # Rotação de chaves de API para balanceamento de carga
+    GEMINI_KEYS = [
+        os.environ.get(f"GEMINI_CHAVE_{i}") 
+        for i in range(1, 8) 
+        if os.environ.get(f"GEMINI_CHAVE_{i}")
+    ]
 
-# --- CARREGAMENTO DO BANCO DE EXERCÍCIOS (JSON EXTERNO) ---
-EXERCISE_KEYS = []
-EXERCISE_DB = {}
-EXERCISE_LIST_STRING = ""
-
-try:
-    with open("exercises.json", "r", encoding="utf-8") as f:
-        EXERCISE_DB = json.load(f)
-        EXERCISE_KEYS = list(EXERCISE_DB.keys())
-        EXERCISE_LIST_STRING = ", ".join([k for k in EXERCISE_KEYS])
-        
-    print(f"✅ Banco de Exercícios Carregado e Indexado: {len(EXERCISE_DB)} itens.")
-except Exception as e:
-    print(f"⚠️ AVISO CRÍTICO: Erro ao carregar exercises.json. A API funcionará, mas sem imagens. Erro: {e}")
+settings = Settings()
 
 # --- MOTORES DE IA (MANTIDOS ESTRITAMENTE IGUAIS) ---
 MOTORES_TECHNOBOLT = [
@@ -45,177 +69,214 @@ MOTORES_TECHNOBOLT = [
     "models/gemini-flash-latest"
 ]
 
-# --- CONEXÃO BANCO ---
-def get_database():
+# --- CAMADA DE DADOS: CONEXÃO MONGODB ---
+class Database:
+    client: MongoClient = None
+
+    @classmethod
+    def connect(cls):
+        try:
+            password = urllib.parse.quote_plus(settings.MONGO_PASS)
+            uri = f"mongodb+srv://{settings.MONGO_USER}:{password}@{settings.MONGO_HOST}/?appName=Cluster0"
+            cls.client = MongoClient(uri)
+            # Teste de conexão (Ping)
+            cls.client.admin.command('ping')
+            logger.info("✅ Conexão com MongoDB estabelecida com sucesso.")
+        except Exception as e:
+            logger.critical(f"❌ Falha crítica ao conectar no MongoDB: {e}")
+            raise e
+
+    @classmethod
+    def get_db(cls):
+        if cls.client is None:
+            cls.connect()
+        return cls.client[settings.DB_NAME]
+
+# Inicializa conexão
+Database.connect()
+db = Database.get_db()
+
+# --- UTILITÁRIOS: PYOBJECTID (SERIALIZAÇÃO AUTOMÁTICA) ---
+# Isso substitui a função 'preparar_resposta_frontend' de forma nativa no Pydantic
+PyObjectId = Annotated[str, BeforeValidator(str)]
+
+class MongoModel(BaseModel):
+    """Classe base para modelos que usam ObjectId."""
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        arbitrary_types_allowed=True,
+        json_encoders={ObjectId: str}
+    )
+
+# --- MODELOS DE DADOS (SCHEMAS) ---
+# Aumenta a robustez e documentação da API
+
+class UserLogin(BaseModel):
+    usuario: str
+    senha: str
+
+class UserRegister(BaseModel):
+    usuario: str
+    senha: str
+    nome: str
+    peso: float
+    altura: float
+    genero: str
+
+class UserUpdate(BaseModel):
+    usuario: str
+    nome: Optional[str] = None
+    peso: Optional[float] = None
+    altura: Optional[float] = None
+    genero: Optional[str] = None
+    restricoes_alim: Optional[str] = None
+    restricoes_fis: Optional[str] = None
+    medicamentos: Optional[str] = None
+    info_add: Optional[str] = None
+    foto_perfil: Optional[str] = None
+
+class SocialPostRequest(BaseModel):
+    usuario: str
+    post_id: str
+
+class SocialCommentRequest(BaseModel):
+    usuario: str
+    post_id: str
+    texto: str
+
+class ChatMessageRequest(BaseModel):
+    remetente: str
+    destinatario: str
+    texto: str
+
+class AdminUserEdit(BaseModel):
+    target_user: str
+    status: Optional[str] = None
+    creditos: Optional[int] = None
+
+# --- BANCO DE EXERCÍCIOS ---
+EXERCISE_DB = {}
+EXERCISE_LIST_STRING = ""
+
+def carregar_exercicios():
+    global EXERCISE_DB, EXERCISE_LIST_STRING
     try:
-        user = os.environ.get("MONGO_USER", "technobolt")
-        password = urllib.parse.quote_plus(os.environ.get("MONGO_PASS", "tech@132"))
-        host = os.environ.get("MONGO_HOST", "cluster0.zbjsvk6.mongodb.net")
-        uri = f"mongodb+srv://{user}:{password}@{host}/?appName=Cluster0"
-        return MongoClient(uri).technoboltgym
+        with open("exercises.json", "r", encoding="utf-8") as f:
+            EXERCISE_DB = json.load(f)
+            keys = list(EXERCISE_DB.keys())
+            EXERCISE_LIST_STRING = ", ".join(keys)
+        logger.info(f"✅ Banco de Exercícios Carregado: {len(EXERCISE_DB)} itens.")
+    except FileNotFoundError:
+        logger.warning("⚠️ Arquivo exercises.json não encontrado. Operando sem validação visual.")
     except Exception as e:
-        print(f"Erro Mongo: {e}")
-        return None
+        logger.error(f"⚠️ Erro ao carregar exercises.json: {e}")
 
-db = get_database()
+carregar_exercicios()
 
-# --- SANITIZAÇÃO DE OBJETOS (PRESERVA TIPOS NATIVOS) ---
-# [MODIFICADO] Agora preserva int, float e bool. Apenas converte ObjectId para str.
-def preparar_resposta_frontend(data):
-    """
-    Percorre a estrutura e prepara para JSON.
-    Mantém tipos primitivos (int, float, bool, none) intactos.
-    Converte apenas ObjectId para string para permitir serialização.
-    """
-    if isinstance(data, dict):
-        return {k: preparar_resposta_frontend(v) for k, v in data.items()}
-    elif isinstance(data, list):
-        return [preparar_resposta_frontend(v) for v in data]
-    elif isinstance(data, ObjectId):
-        return str(data) # Necessário pois ObjectId não é serializável por padrão
-    else:
-        return data # Retorna int, float, str, None, bool como são
+# --- SERVIÇOS (LÓGICA DE NEGÓCIO) ---
 
-# --- FUNÇÕES UTILITÁRIAS GERAIS ---
-
-def rodar_ia(prompt, imagem_bytes=None):
-    chaves = [os.environ.get(f"GEMINI_CHAVE_{i}") for i in range(1, 8) if os.environ.get(f"GEMINI_CHAVE_{i}")]
-    img_blob = {"mime_type": "image/jpeg", "data": imagem_bytes} if imagem_bytes else None
-    random.shuffle(chaves)
+class AIService:
+    """Gerencia interações com a API do Gemini."""
     
-    for chave in chaves:
-        genai.configure(api_key=chave)
+    @staticmethod
+    def _get_api_key():
+        if not settings.GEMINI_KEYS:
+            logger.error("Nenhuma chave de API do Gemini configurada.")
+            return None
+        key = random.choice(settings.GEMINI_KEYS)
+        return key
+
+    @staticmethod
+    def generate_content(prompt: str, image_bytes: Optional[bytes] = None) -> Optional[str]:
+        """
+        Executa uma requisição para a IA com retry e fallback de modelos.
+        """
+        api_key = AIService._get_api_key()
+        if not api_key:
+            return None
+
+        img_blob = {"mime_type": "image/jpeg", "data": image_bytes} if image_bytes else None
+        
+        # Configura cliente
+        genai.configure(api_key=api_key)
+        
         for modelo in MOTORES_TECHNOBOLT:
             try:
+                logger.info(f"🧠 Tentando inferência com modelo: {modelo}")
                 model = genai.GenerativeModel(modelo)
-                generation_config = {
-                    "response_mime_type": "application/json" if "json" in prompt.lower() else "text/plain",
-                    "max_output_tokens": 8192, 
-                    "temperature": 0.7
-                }
+                
+                config = genai.types.GenerationConfig(
+                    response_mime_type="application/json" if "json" in prompt.lower() else "text/plain",
+                    max_output_tokens=8192,
+                    temperature=0.7
+                )
+                
                 inputs = [prompt, img_blob] if img_blob else [prompt]
-                response = model.generate_content(inputs, generation_config=generation_config)
+                response = model.generate_content(inputs, generation_config=config)
+                
                 if response and response.text:
                     return response.text
+                    
             except Exception as e:
-                print(f"Erro IA ({modelo}): {e}")
-                continue 
-    return None
-
-def limpar_e_parsear_json(texto_ia):
-    try:
-        # 1. Extração Robusta com Regex (Pega apenas o conteúdo entre chaves)
-        match = re.search(r'\{.*\}', texto_ia, re.DOTALL)
-        if match:
-            texto_limpo = match.group(0)
-        else:
-            texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
-
-        # 2. Parseamento
-        parsed = json.loads(texto_limpo)
-        
-        # 3. Preparação para Frontend (Mantendo Tipos)
-        return preparar_resposta_frontend(parsed)
-    except Exception as e:
-        print(f"Erro ao parsear JSON da IA: {e}")
-        # Retorno de fallback estruturado
-        return preparar_resposta_frontend({
-            "avaliacao": {"insight": "Houve uma instabilidade na análise detalhada, mas geramos um protocolo base de segurança."},
-            "dieta": [],
-            "suplementacao": [],
-            "treino": []
-        })
-
-def otimizar_imagem(file_bytes, quality=70, size=(800, 800)):
-    try:
-        img = Image.open(io.BytesIO(file_bytes))
-        img = ImageOps.exif_transpose(img).convert("RGB")
-        img.thumbnail(size)
-        output = io.BytesIO()
-        img.save(output, format='JPEG', quality=quality)
-        return output.getvalue()
-    except Exception:
-        return file_bytes
-
-# --- [CORE] VALIDAÇÃO E BLINDAGEM DE EXERCÍCIOS ---
-
-def normalizar_texto(texto):
-    if not texto: return ""
-    if not isinstance(texto, str): texto = str(texto)
-    return "".join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower().strip()
-
-def validar_e_corrigir_exercicios(lista_exercicios):
-    if not lista_exercicios or not EXERCISE_DB: return lista_exercicios
-    
-    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
-    
-    db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
-    db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
-
-    for ex in lista_exercicios:
-        nome_ia = ex.get('nome', '')
-        nome_ia_norm = normalizar_texto(nome_ia)
-        
-        pasta_github = None
-        nome_final = str(nome_ia)
-
-        if nome_ia_norm in db_map_norm:
-            pasta_github = db_map_norm[nome_ia_norm]
-            nome_final = db_title_map[nome_ia_norm].title()
-        else:
-            matches = difflib.get_close_matches(nome_ia_norm, db_map_norm.keys(), n=1, cutoff=0.6)
-            if matches:
-                match_key = matches[0]
-                pasta_github = db_map_norm[match_key]
-                nome_final = db_title_map[match_key].title()
-            else:
-                melhor_candidato = None
-                for key in db_map_norm.keys():
-                    if (key in nome_ia_norm and len(key) > 4) or (nome_ia_norm in key and len(nome_ia_norm) > 4): 
-                        melhor_candidato = key
-                        break
+                logger.warning(f"Falha no modelo {modelo}: {e}. Tentando próximo...")
+                continue
                 
-                if melhor_candidato:
-                    pasta_github = db_map_norm[melhor_candidato]
-                    nome_final = db_title_map[melhor_candidato].title()
-                else:
-                    fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
-                    pasta_github = db_map_norm[fallback_key]
-                    nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
+        logger.error("❌ Todos os modelos de IA falharam.")
+        return None
 
-        ex['nome'] = str(nome_final)
-        
-        if pasta_github:
-            ex['imagens_demonstracao'] = [
-                f"{base_url}/{pasta_github}/0.jpg",
-                f"{base_url}/{pasta_github}/1.jpg"
-            ]
-        else:
-            ex['imagens_demonstracao'] = [] 
+class ImageService:
+    """Utilitários para processamento de imagem."""
+    
+    @staticmethod
+    def optimize(file_bytes: bytes, quality: int = 70, size: tuple = (800, 800)) -> bytes:
+        try:
+            with Image.open(io.BytesIO(file_bytes)) as img:
+                # Corrige orientação baseada em EXIF
+                img = ImageOps.exif_transpose(img)
+                # Converte para RGB (remove alpha se houver)
+                if img.mode != 'RGB':
+                    img = img.convert("RGB")
+                
+                # Redimensiona mantendo proporção
+                img.thumbnail(size)
+                
+                output = io.BytesIO()
+                img.save(output, format='JPEG', quality=quality, optimize=True)
+                return output.getvalue()
+        except Exception as e:
+            logger.error(f"Erro ao otimizar imagem: {e}")
+            return file_bytes # Retorna original em caso de erro
 
-    return lista_exercicios
-
-# --- PDF GENERATOR ---
-
-def sanitizar_texto(texto):
-    if not texto: return ""
-    if not isinstance(texto, str): texto = str(texto)
-    texto = texto.replace("🚀", ">>").replace("✅", "[OK]").replace("⚠️", "[!]")
-    texto = texto.replace("💊", "").replace("🥗", "").replace("🏋️", "").replace("📊", "")
-    texto = texto.replace("**", "").replace("###", "").replace("##", "")
-    texto = texto.replace("–", "-").replace("“", '"').replace("”", '"')
-    return texto.encode('latin-1', 'replace').decode('latin-1')
-
-class ModernPDF(FPDF):
+class PDFService(FPDF):
+    """Gerador de relatórios PDF customizado."""
+    
     def __init__(self):
         super().__init__()
         self.set_auto_page_break(auto=True, margin=15)
+        # Paleta de Cores TechnoBolt
         self.col_fundo = (20, 20, 25)
         self.col_card = (35, 35, 40)
         self.col_azul = (59, 130, 246)
         self.col_texto = (230, 230, 230)
         self.col_destaque = (0, 255, 200)
         self.col_verde = (16, 185, 129)
+
+    def sanitizar_texto(self, texto: Any) -> str:
+        if not texto: return ""
+        texto = str(texto)
+        subs = {
+            "🚀": ">>", "✅": "[OK]", "⚠️": "[!]", 
+            "💊": "", "🥗": "", "🏋️": "", "📊": "",
+            "**": "", "###": "", "##": "", "–": "-", 
+            "“": '"', "”": '"'
+        }
+        for k, v in subs.items():
+            texto = texto.replace(k, v)
+        
+        # Tratamento de encoding para FPDF (Latin-1)
+        return texto.encode('latin-1', 'replace').decode('latin-1')
 
     def header(self):
         self.set_fill_color(*self.col_fundo)
@@ -249,7 +310,7 @@ class ModernPDF(FPDF):
         self.set_text_color(*self.col_destaque)
         self.cell(10, 10, icon, 0, 0)
         self.set_text_color(*self.col_azul)
-        self.cell(0, 10, sanitizar_texto(title.upper()), 0, 1)
+        self.cell(0, 10, self.sanitizar_texto(title.upper()), 0, 1)
         self.set_draw_color(50, 50, 60)
         self.line(10, self.get_y(), 100, self.get_y())
         self.ln(5)
@@ -257,39 +318,107 @@ class ModernPDF(FPDF):
     def draw_card_text(self, label, content):
         self.set_fill_color(*self.col_card)
         self.set_text_color(*self.col_texto)
-        self.set_font("Helvetica", "", 10)
         self.set_font("Helvetica", "B", 11)
         self.set_text_color(*self.col_azul)
-        self.multi_cell(0, 6, sanitizar_texto(label), fill=True)
+        self.multi_cell(0, 6, self.sanitizar_texto(label), fill=True)
         self.set_font("Helvetica", "", 10)
         self.set_text_color(*self.col_texto)
-        self.texto = sanitizar_texto(str(content))
-        self.multi_cell(0, 6, self.texto, fill=True)
+        self.multi_cell(0, 6, self.sanitizar_texto(str(content)), fill=True)
         self.ln(2)
 
-    def draw_table_row(self, col1, col2, col3=None):
-        self.set_fill_color(*self.col_card)
-        self.set_text_color(*self.col_texto)
-        self.set_font("Helvetica", "", 9)
-        self.set_draw_color(*self.col_fundo) 
-        self.set_line_width(0.3)
-        h = 8 
-        self.set_font("Helvetica", "B", 9)
-        self.set_text_color(*self.col_destaque)
-        self.cell(40, h, sanitizar_texto(col1), 1, 0, 'L', True)
-        self.set_font("Helvetica", "", 9)
-        self.set_text_color(*self.col_texto)
-        if col3:
-            self.cell(100, h, sanitizar_texto(col2), 1, 0, 'L', True)
-            self.set_font("Helvetica", "I", 8)
-            self.set_text_color(150, 150, 150)
-            self.cell(50, h, sanitizar_texto(col3), 1, 1, 'L', True)
+# --- APLICAÇÃO FASTAPI ---
+app = FastAPI(
+    title=settings.API_TITLE,
+    version=settings.API_VERSION,
+    description="Backend de alta performance para a plataforma TechnoBolt Gym Hub.",
+    openapi_tags=[
+        {"name": "Auth", "description": "Autenticação e Registro"},
+        {"name": "Perfil", "description": "Gestão de Usuários"},
+        {"name": "Analise", "description": "Inteligência Artificial Generativa"},
+        {"name": "Social", "description": "Feed, Likes e Comentários"},
+        {"name": "Admin", "description": "Painel Administrativo"},
+    ]
+)
+
+# Configuração de CORS (Permitir acesso do Frontend)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- HELPERS DE LÓGICA ---
+
+def normalizar_texto(texto: str) -> str:
+    """Remove acentos e coloca em minúsculas para comparação."""
+    if not texto: return ""
+    if not isinstance(texto, str): texto = str(texto)
+    return "".join(c for c in unicodedata.normalize('NFD', texto) 
+                   if unicodedata.category(c) != 'Mn').lower().strip()
+
+def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
+    """Associa exercícios gerados pela IA com imagens do banco local."""
+    if not lista_exercicios or not EXERCISE_DB: 
+        return lista_exercicios
+    
+    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
+    
+    # Mapas para busca O(1)
+    db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
+    db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
+
+    for ex in lista_exercicios:
+        nome_ia = ex.get('nome', '')
+        nome_ia_norm = normalizar_texto(nome_ia)
+        
+        pasta_github = None
+        nome_final = str(nome_ia)
+
+        # 1. Tentativa de Match Exato
+        if nome_ia_norm in db_map_norm:
+            pasta_github = db_map_norm[nome_ia_norm]
+            nome_final = db_title_map[nome_ia_norm].title()
         else:
-            self.cell(150, h, sanitizar_texto(col2), 1, 1, 'L', True)
+            # 2. Match por Similaridade (Difflib)
+            matches = difflib.get_close_matches(nome_ia_norm, db_map_norm.keys(), n=1, cutoff=0.6)
+            if matches:
+                match_key = matches[0]
+                pasta_github = db_map_norm[match_key]
+                nome_final = db_title_map[match_key].title()
+            else:
+                # 3. Match por Substring (Busca parcial)
+                melhor_candidato = None
+                for key in db_map_norm.keys():
+                    # Evita matches curtos demais (ex: "remada" vs "remada alta")
+                    if (key in nome_ia_norm and len(key) > 4) or (nome_ia_norm in key and len(nome_ia_norm) > 4): 
+                        melhor_candidato = key
+                        break
+                
+                if melhor_candidato:
+                    pasta_github = db_map_norm[melhor_candidato]
+                    nome_final = db_title_map[melhor_candidato].title()
+                else:
+                    # 4. Fallback (Polichinelo)
+                    fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
+                    pasta_github = db_map_norm[fallback_key]
+                    nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
 
-# --- FUNÇÕES AUXILIARES DE NEGÓCIO ---
+        ex['nome'] = str(nome_final)
+        
+        if pasta_github:
+            ex['imagens_demonstracao'] = [
+                f"{base_url}/{pasta_github}/0.jpg",
+                f"{base_url}/{pasta_github}/1.jpg"
+            ]
+        else:
+            ex['imagens_demonstracao'] = [] 
 
-def calcular_medalha(username):
+    return lista_exercicios
+
+def calcular_medalha(username: str) -> str:
+    """Calcula a medalha do usuário baseada em pontos (Gamification)."""
     try:
         user = db.usuarios.find_one({"usuario": username})
         if not user: return ""
@@ -301,16 +430,46 @@ def calcular_medalha(username):
     except Exception:
         return ""
 
-# --- ENDPOINTS: AUTH & PERFIL ---
+def limpar_e_parsear_json(texto_ia: str) -> dict:
+    """Extrai e valida JSON de uma resposta de texto da IA."""
+    try:
+        # Regex para extrair apenas o objeto JSON {}
+        match = re.search(r'\{.*\}', texto_ia, re.DOTALL)
+        if match:
+            texto_limpo = match.group(0)
+        else:
+            # Fallback de limpeza manual
+            texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
 
-@app.post("/auth/login")
-def login(dados: dict):
-    user = db.usuarios.find_one({"usuario": dados['usuario'], "senha": dados['senha']})
-    if not user: raise HTTPException(401, "Credenciais inválidas")
-    if user.get("status") != "ativo" and not user.get("is_admin"):
-        raise HTTPException(403, "Sua conta está aguardando ativação pelo administrador.")
+        parsed = json.loads(texto_limpo)
+        return parsed # Retorna tipos nativos (int, float, etc.)
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Erro de parse JSON: {e}")
+        # Retorna estrutura de segurança
+        return {
+            "avaliacao": {"insight": "Houve uma instabilidade na análise, mas geramos um protocolo base."},
+            "dieta": [],
+            "suplementacao": [],
+            "treino": []
+        }
+
+# --- ROTAS: AUTH & PERFIL ---
+
+@app.post("/auth/login", tags=["Auth"], response_model=Dict[str, Any])
+def login(dados: UserLogin):
+    """Autentica o usuário e retorna perfil completo."""
+    user = db.usuarios.find_one({"usuario": dados.usuario, "senha": dados.senha})
     
-    raw_response = {
+    if not user:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciais inválidas")
+    
+    if user.get("status") != "ativo" and not user.get("is_admin"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Sua conta aguarda ativação.")
+    
+    # Monta resposta manualmente para garantir estrutura
+    # O PyObjectId lida com a serialização do ID se necessário
+    return {
         "sucesso": True,
         "dados": {
             "usuario": user['usuario'],
@@ -328,44 +487,41 @@ def login(dados: dict):
             "info_add": user.get('info_add', '')
         }
     }
-    return preparar_resposta_frontend(raw_response)
 
-@app.post("/auth/registro")
-def registrar(dados: dict):
-    if db.usuarios.find_one({"usuario": dados['usuario']}):
-        raise HTTPException(400, "Usuário já existe")
-    novo_user = {
-        **dados,
+@app.post("/auth/registro", tags=["Auth"])
+def registrar(dados: UserRegister):
+    """Cria um novo usuário no sistema."""
+    if db.usuarios.find_one({"usuario": dados.usuario}):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Usuário já existe")
+    
+    novo_user = dados.model_dump()
+    novo_user.update({
         "status": "pendente",
         "avaliacoes_restantes": 0,
         "pontos": 0,
         "historico_dossies": [],
         "is_admin": False
-    }
+    })
+    
     db.usuarios.insert_one(novo_user)
     return {"sucesso": True, "mensagem": "Cadastro realizado"}
-    
-@app.post("/perfil/atualizar")
-def atualizar_perfil(dados: dict):
-    update_data = {
-        "nome": dados.get('nome'),
-        "peso": dados.get('peso'),
-        "altura": dados.get('altura'),
-        "genero": dados.get('genero'),
-        "restricoes_alim": dados.get('restricoes_alim'),
-        "restricoes_fis": dados.get('restricoes_fis'),
-        "medicamentos": dados.get('medicamentos'),
-        "info_add": dados.get('info_add'),
-    }
-    if 'foto_perfil' in dados:
-        update_data['foto_perfil'] = dados.get('foto_perfil')
 
-    db.usuarios.update_one({"usuario": dados['usuario']}, {"$set": update_data})
+@app.post("/perfil/atualizar", tags=["Perfil"])
+def atualizar_perfil(dados: UserUpdate):
+    """Atualiza informações cadastrais do usuário."""
+    # Filtra apenas campos não nulos
+    update_data = {k: v for k, v in dados.model_dump(exclude={'usuario'}).items() if v is not None}
+    
+    result = db.usuarios.update_one({"usuario": dados.usuario}, {"$set": update_data})
+    
+    if result.matched_count == 0:
+        raise HTTPException(404, "Usuário não encontrado")
+        
     return {"sucesso": True}
 
-# --- ENDPOINTS: ANÁLISE (ESTRUTURADA PARA JSON) ---
+# --- ROTAS: ANÁLISE IA ---
 
-@app.post("/analise/executar")
+@app.post("/analise/executar", tags=["Analise"])
 async def executar_analise(
     usuario: str = Form(...),
     nome_completo: str = Form(...),
@@ -376,22 +532,27 @@ async def executar_analise(
     observacoes: str = Form(""), 
     foto: UploadFile = File(...)
 ):
+    """Gera um protocolo completo de treino e dieta usando IA."""
+    
+    # 1. Tratamento e Validação de Inputs
     try:
         peso_clean = str(peso).replace(',', '.')
         peso_float = float(peso_clean)
         
         altura_clean = str(altura).replace(',', '.').replace('cm', '').strip()
         altura_val = float(altura_clean)
+        # Normaliza altura para cm
         if altura_val < 3.0: 
              altura_int = int(altura_val * 100)
         else:
              altura_int = int(altura_val)
              
     except ValueError:
+        logger.warning(f"Erro ao converter medidas para user {usuario}. Usando padrão.")
         peso_float = 70.0 
         altura_int = 175
 
-    # Atualiza dados no banco
+    # 2. Atualiza dados básicos no banco
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
@@ -403,19 +564,24 @@ async def executar_analise(
         }}
     )
 
+    # 3. Busca contexto existente
     user_data = db.usuarios.find_one({"usuario": usuario})
+    if not user_data:
+        raise HTTPException(404, "Usuário não encontrado após update.")
+
     r_a = user_data.get('restricoes_alim', 'Nenhuma')
     r_m = user_data.get('medicamentos', 'Nenhum')
     r_f = user_data.get('restricoes_fis', 'Nenhuma')
     info = observacoes 
 
+    # 4. Processamento de Imagem
     content = await foto.read()
-    img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
+    img_otimizada = ImageService.optimize(content, quality=85, size=(800, 800))
     
     altura_m = altura_int / 100 if altura_int > 0 else 1.70
     imc = peso_float / (altura_m**2)
     
-    # [PROMPT MESTRE - OTIMIZADO PARA JUSTIFICATIVAS E SUPERÁVIT]
+    # 5. Engenharia de Prompt (Otimizado)
     prompt_mestre = f"""
     VOCÊ É UM TREINADOR DE ELITE E NUTRICIONISTA PhD.
     SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO PARA MAXIMIZAR RESULTADOS (Hipertrofia/Definição).
@@ -482,19 +648,24 @@ async def executar_analise(
     }}
     """
     
-    resultado_raw = rodar_ia(prompt_mestre, img_otimizada)
-    if not resultado_raw: raise HTTPException(503, "IA Indisponível.")
+    resultado_raw = AIService.generate_content(prompt_mestre, img_otimizada)
+    if not resultado_raw: 
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Serviço de IA Indisponível.")
 
     conteudo_json = limpar_e_parsear_json(resultado_raw)
 
+    # 6. Pós-processamento e Validação de Exercícios
     if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
         for dia in conteudo_json['treino']:
+            # Limpa nome do dia
             if 'dia' in dia:
                 dia['dia'] = str(dia['dia']).split('-')[0].split(' ')[0].replace(',', '').strip()
 
+            # Valida e anexa imagens aos exercícios
             if 'exercicios' in dia and isinstance(dia['exercicios'], list):
                 dia['exercicios'] = validar_e_corrigir_exercicios(dia['exercicios'])
 
+    # 7. Persistência
     dossie = {
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "peso_reg": peso_float,
@@ -507,41 +678,50 @@ async def executar_analise(
         }
     }
     
+    # Atualiza saldo se não for admin
+    update_query = {"$push": {"historico_dossies": dossie}}
     if not user_data.get('is_admin', False):
-        db.usuarios.update_one({"usuario": usuario}, {"$push": {"historico_dossies": dossie}, "$inc": {"avaliacoes_restantes": -1}})
-    else:
-        db.usuarios.update_one({"usuario": usuario}, {"$push": {"historico_dossies": dossie}})
+        update_query["$inc"] = {"avaliacoes_restantes": -1}
+        
+    db.usuarios.update_one({"usuario": usuario}, update_query)
     
-    return preparar_resposta_frontend({"sucesso": True, "resultado": dossie})
+    # Retorna tipos nativos (Pydantic/FastAPI serializa automaticamente)
+    return {"sucesso": True, "resultado": dossie}
 
-@app.post("/analise/regenerar-secao")
-def regenerar_secao(dados: dict):
+@app.post("/analise/regenerar-secao", tags=["Analise"])
+def regenerar_secao(dados: dict = Body(...)):
+    """Regenera uma parte específica do protocolo (ex: Dieta de Terça)."""
     usuario = dados.get("usuario")
     secao = dados.get("secao")
     dia_alvo = dados.get("dia") 
     
     if not usuario or secao not in ["dieta", "treino", "suplementacao", "avaliacao"]:
-        return preparar_resposta_frontend({"sucesso": False, "mensagem": "Seção inválida."})
+        return {"sucesso": False, "mensagem": "Parâmetros inválidos."}
 
     user_data = db.usuarios.find_one({"usuario": usuario})
-    if not user_data: return preparar_resposta_frontend({"sucesso": False, "mensagem": "Usuário não encontrado."})
+    if not user_data: return {"sucesso": False, "mensagem": "Usuário não encontrado."}
     
+    # Validação de Saldo
     creditos = user_data.get('avaliacoes_restantes', 0)
     is_admin = user_data.get('is_admin', False)
 
     if creditos <= 0 and not is_admin:
-        return preparar_resposta_frontend({"sucesso": False, "mensagem": "Saldo insuficiente."})
+        return {"sucesso": False, "mensagem": "Saldo insuficiente."}
 
     if not user_data.get('historico_dossies'):
-        return preparar_resposta_frontend({"sucesso": False, "mensagem": "Sem histórico."})
+        return {"sucesso": False, "mensagem": "Sem histórico para regenerar."}
 
     ultimo_dossie = user_data['historico_dossies'][-1]
     
+    # Contexto para IA
     r_a = user_data.get('restricoes_alim', 'Nenhuma')
     r_f = user_data.get('restricoes_fis', 'Nenhuma')
     obs = user_data.get('info_add', 'Nenhuma')
     nome = user_data.get('nome', 'Atleta')
     
+    prompt_regeneracao = ""
+
+    # Lógica de Prompt Específico
     if dia_alvo and secao in ["dieta", "treino"]:
         # --- REFRESH DE DIA ÚNICO ---
         if secao == "treino":
@@ -580,7 +760,6 @@ def regenerar_secao(dados: dict):
             RETORNE APENAS O JSON DO DIA:
             {{ "dia": "{dia_alvo}", "foco_nutricional": "...", "refeicoes": [...], "macros_totais": "P: Xg | C: Yg | G: Zg" }}
             """
-
     else:
         # Refresh Seção Completa
         prompt_regeneracao = f"""
@@ -599,11 +778,12 @@ def regenerar_secao(dados: dict):
         RETORNE JSON: {{ "{secao}": [ ... ] }}
         """
 
-    resultado_texto = rodar_ia(prompt_regeneracao)
-    if not resultado_texto: return preparar_resposta_frontend({"sucesso": False, "mensagem": "Erro IA."})
+    resultado_texto = AIService.generate_content(prompt_regeneracao)
+    if not resultado_texto: return {"sucesso": False, "mensagem": "Erro IA."}
 
     novo_dado_ia = limpar_e_parsear_json(resultado_texto)
     
+    # Valida exercícios novamente se for treino
     if secao == "treino":
         if 'treino' in novo_dado_ia and isinstance(novo_dado_ia['treino'], list):
             for dia in novo_dado_ia['treino']:
@@ -618,11 +798,12 @@ def regenerar_secao(dados: dict):
             
             novo_dado_ia = obj_dia
 
-    # Lógica de atualização no Banco
+    # Lógica de atualização no Banco (Merge no JSON existente)
     updates = {}
     if dia_alvo and secao in ["dieta", "treino"]:
         lista_atual = ultimo_dossie.get('conteudo_bruto', {}).get('json_full', {}).get(secao, [])
         idx_alvo = -1
+        # Busca índice do dia para update posicional
         for i, item in enumerate(lista_atual):
             if dia_alvo.lower() in str(item.get('dia', '')).lower():
                 idx_alvo = i
@@ -648,20 +829,22 @@ def regenerar_secao(dados: dict):
         db.usuarios.update_one({"usuario": usuario}, mongo_cmd)
         
         user_atualizado = db.usuarios.find_one({"usuario": usuario})
-        return preparar_resposta_frontend({
+        return {
             "sucesso": True, 
             "resultado": user_atualizado['historico_dossies'][-1],
             "novo_saldo": user_atualizado.get('avaliacoes_restantes', 0)
-        })
+        }
     
-    return preparar_resposta_frontend({"sucesso": False, "mensagem": "Estrutura inválida."})
+    return {"sucesso": False, "mensagem": "Não foi possível estruturar os dados da IA."}
 
-@app.get("/historico/{usuario}")
+@app.get("/historico/{usuario}", tags=["Perfil"])
 def buscar_historico(usuario: str):
+    """Retorna o histórico completo e perfil atualizado."""
     user = db.usuarios.find_one({"usuario": usuario})
-    if not user: return preparar_resposta_frontend({"sucesso": True, "historico": []})
+    if not user: return {"sucesso": True, "historico": []}
     
-    raw_response = {
+    # Retorna tipos nativos (int, float) sem converter para string
+    return {
         "sucesso": True, 
         "historico": user.get('historico_dossies', []), 
         "creditos": user.get('avaliacoes_restantes', 0), 
@@ -676,93 +859,110 @@ def buscar_historico(usuario: str):
             "creditos": user.get('avaliacoes_restantes', 0)
         }
     }
-    return preparar_resposta_frontend(raw_response)
 
-# --- ENDPOINTS: SOCIAL E DESAFIOS ---
+# --- ROTAS: SOCIAL E FEED ---
 
-@app.get("/social/feed")
+@app.get("/social/feed", tags=["Social"])
 def get_feed():
-    posts = list(db.posts.find().sort("data", -1).limit(50))
+    """Retorna o feed de postagens ordenado por data."""
+    # O PyObjectId no Model (se implementado) ou conversão manual aqui
+    posts = list(db.posts.find().sort("data", DESCENDING).limit(50))
     for p in posts: 
-        p['_id'] = str(p['_id'])
+        p['_id'] = str(p['_id']) # Conversão explicita ainda necessária se não usar response_model list
         p['likes'] = p.get('likes', [])
         p['comentarios'] = p.get('comentarios', [])
         p['medalha'] = calcular_medalha(p.get('autor'))
-    return preparar_resposta_frontend({"sucesso": True, "feed": posts})
+    return {"sucesso": True, "feed": posts}
 
-@app.post("/social/postar")
-async def postar_feed(usuario: str = Form(...), legenda: str = Form(...), imagem: UploadFile = File(...)):
+@app.post("/social/postar", tags=["Social"])
+async def postar_feed(
+    usuario: str = Form(...), 
+    legenda: str = Form(...), 
+    imagem: UploadFile = File(...)
+):
+    """Cria uma nova postagem com imagem."""
     content = await imagem.read()
-    img_otimizada = otimizar_imagem(content, size=(600, 600))
+    img_otimizada = ImageService.optimize(content, size=(600, 600))
     img_b64 = base64.b64encode(img_otimizada).decode('utf-8')
 
-    post_id = db.posts.insert_one({
+    post_doc = {
         "autor": usuario,
         "legenda": legenda,
         "imagem": img_b64,
         "data": datetime.now().isoformat(),
         "likes": [],
         "comentarios": []
-    }).inserted_id
+    }
+    
+    post_id = db.posts.insert_one(post_doc).inserted_id
 
+    # Comentário automático da IA
     prompt_comentario = f"Aja como um personal trainer da TechnoBolt. Comentário curto (máx 15 palavras) para foto com legenda: '{legenda}'"
-    comentario_ia = rodar_ia(prompt_comentario, img_otimizada)
+    comentario_ia = AIService.generate_content(prompt_comentario, img_otimizada)
     
     if comentario_ia:
-        db.posts.update_one({"_id": post_id}, {"$push": {"comentarios": {"autor": "TechnoBolt AI 🤖", "texto": comentario_ia}}})
+        db.posts.update_one(
+            {"_id": post_id}, 
+            {"$push": {"comentarios": {"autor": "TechnoBolt AI 🤖", "texto": comentario_ia}}}
+        )
 
-    return preparar_resposta_frontend({"sucesso": True})
+    return {"sucesso": True}
 
-@app.post("/social/post/deletar")
-def deletar_post_social(dados: dict):
+@app.post("/social/post/deletar", tags=["Social"])
+def deletar_post_social(dados: SocialPostRequest):
+    """Remove uma postagem (apenas o autor pode deletar)."""
     try:
-        post_id = dados.get("post_id")
-        usuario = dados.get("usuario")
-        if not post_id or not usuario: return preparar_resposta_frontend({"sucesso": False, "mensagem": "Dados incompletos"})
-        try: oid = ObjectId(post_id)
-        except: return preparar_resposta_frontend({"sucesso": False, "mensagem": "ID inválido"})
-        result = db.posts.delete_one({"_id": oid, "autor": usuario})
-        return preparar_resposta_frontend({"sucesso": True} if result.deleted_count > 0 else {"sucesso": False})
-    except Exception as e: return preparar_resposta_frontend({"sucesso": False, "mensagem": str(e)})
+        oid = ObjectId(dados.post_id)
+        result = db.posts.delete_one({"_id": oid, "autor": dados.usuario})
+        return {"sucesso": True} if result.deleted_count > 0 else {"sucesso": False, "mensagem": "Post não encontrado ou não autorizado."}
+    except Exception as e:
+        return {"sucesso": False, "mensagem": str(e)}
         
-@app.post("/social/curtir")
-def curtir_post(dados: dict):
+@app.post("/social/curtir", tags=["Social"])
+def curtir_post(dados: SocialPostRequest):
+    """Alterna like no post (Toggle)."""
     try:
-        post_id = dados.get("post_id")
-        usuario = dados.get("usuario")
-        post = db.posts.find_one({"_id": ObjectId(post_id)})
-        if not post: return preparar_resposta_frontend({"sucesso": False, "mensagem": "Post não encontrado"})
-        if usuario in post.get("likes", []):
-            db.posts.update_one({"_id": ObjectId(post_id)}, {"$pull": {"likes": usuario}})
+        oid = ObjectId(dados.post_id)
+        post = db.posts.find_one({"_id": oid})
+        if not post: return {"sucesso": False, "mensagem": "Post não encontrado"}
+        
+        if dados.usuario in post.get("likes", []):
+            db.posts.update_one({"_id": oid}, {"$pull": {"likes": dados.usuario}})
         else:
-            db.posts.update_one({"_id": ObjectId(post_id)}, {"$addToSet": {"likes": usuario}})
-        return preparar_resposta_frontend({"sucesso": True})
+            db.posts.update_one({"_id": oid}, {"$addToSet": {"likes": dados.usuario}})
+        return {"sucesso": True}
     except Exception as e:
         raise HTTPException(500, f"Erro ao processar like: {str(e)}")
         
-@app.post("/social/comentar")
-def postar_comentario(dados: dict):
+@app.post("/social/comentar", tags=["Social"])
+def postar_comentario(dados: SocialCommentRequest):
+    """Adiciona um comentário a uma postagem."""
     try:
-        post_id = dados.get("post_id")
-        usuario = dados.get("usuario")
-        texto = dados.get("texto")
-        db.posts.update_one({"_id": ObjectId(post_id)}, {"$push": {"comentarios": {"autor": usuario, "texto": texto, "data": datetime.now().isoformat()}}})
-        return preparar_resposta_frontend({"sucesso": True})
+        oid = ObjectId(dados.post_id)
+        comentario = {
+            "autor": dados.usuario,
+            "texto": dados.texto,
+            "data": datetime.now().isoformat()
+        }
+        db.posts.update_one({"_id": oid}, {"$push": {"comentarios": comentario}})
+        return {"sucesso": True}
     except Exception as e:
         raise HTTPException(500, f"Erro ao postar comentário: {str(e)}")
 
-# --- ENDPOINTS: CONQUISTA & RANKING (GAMIFICATION) ---
+# --- ROTAS: GAMIFICATION & CHECKINS ---
 
-@app.get("/social/ranking")
+@app.get("/social/ranking", tags=["Social"])
 def get_ranking_global():
+    """Retorna top 50 usuários por pontos."""
     users = list(db.usuarios.find(
         {"is_admin": False}, 
         {"nome": 1, "usuario": 1, "pontos": 1, "foto_perfil": 1, "_id": 0}
-    ).sort("pontos", -1).limit(50))
-    return preparar_resposta_frontend({"sucesso": True, "ranking": users})
+    ).sort("pontos", DESCENDING).limit(50))
+    return {"sucesso": True, "ranking": users}
 
-@app.get("/social/checkins")
+@app.get("/social/checkins", tags=["Social"])
 def get_checkins(usuario: str):
+    """Retorna calendário de checkins do mês atual."""
     now = datetime.now()
     start_date = datetime(now.year, now.month, 1).isoformat()
     checkins = list(db.checkins.find(
@@ -775,27 +975,29 @@ def get_checkins(usuario: str):
             formatted[day] = c['tipo']
         except:
             pass
-    return preparar_resposta_frontend({"sucesso": True, "checkins": formatted})
+    return {"sucesso": True, "checkins": formatted}
 
-@app.post("/social/validar-conquista")
+@app.post("/social/validar-conquista", tags=["Social"])
 async def validar_conquista(
     usuario: str = Form(...),
     tipo: str = Form(...), 
     foto: UploadFile = File(...)
 ):
+    """Valida um treino via IA (Computer Vision) para gamification."""
     now = datetime.now()
     today_start = datetime(now.year, now.month, now.day).isoformat()
     
+    # Limite diário de 1 checkin
     ja_fez = db.checkins.find_one({
         "usuario": usuario, 
         "data": {"$gte": today_start}
     })
     
     if ja_fez:
-        return preparar_resposta_frontend({"sucesso": False, "mensagem": "Você já treinou hoje! Volte amanhã."})
+        return {"sucesso": False, "mensagem": "Você já treinou hoje! Volte amanhã."}
 
     content = await foto.read()
-    img_otimizada = otimizar_imagem(content, size=(800, 800))
+    img_otimizada = ImageService.optimize(content, size=(800, 800))
     
     prompt_juiz = f"""
     ATUE COMO UM JUIZ RIGOROSO DE FITNESS.
@@ -808,7 +1010,7 @@ async def validar_conquista(
     Responda APENAS: "APROVADO" ou "REPROVADO".
     """
     
-    resultado_ia = rodar_ia(prompt_juiz, img_otimizada)
+    resultado_ia = AIService.generate_content(prompt_juiz, img_otimizada)
     
     if resultado_ia and "APROVADO" in resultado_ia.upper():
         pontos_ganhos = 50
@@ -822,56 +1024,82 @@ async def validar_conquista(
             {"usuario": usuario},
             {"$inc": {"pontos": pontos_ganhos}}
         )
-        return preparar_resposta_frontend({"sucesso": True, "aprovado": True, "pontos": pontos_ganhos})
+        return {"sucesso": True, "aprovado": True, "pontos": pontos_ganhos}
     else:
-        return preparar_resposta_frontend({"sucesso": True, "aprovado": False, "mensagem": "A IA não identificou evidências claras do treino."})
+        return {"sucesso": True, "aprovado": False, "mensagem": "A IA não identificou evidências claras do treino."}
 
-# --- ENDPOINTS: ADMIN ---
+# --- ROTAS: ADMINISTRAÇÃO ---
 
-@app.get("/setup/criar-admin")
+@app.get("/setup/criar-admin", tags=["Admin"])
 def criar_admin_inicial():
-    if db.usuarios.find_one({"usuario": "admin"}): return preparar_resposta_frontend({"sucesso": False, "mensagem": "Admin já existe!"})
-    db.usuarios.insert_one({"usuario": "admin", "senha": "123", "nome": "Super Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999, "historico_dossies": [], "peso": 80.0, "altura": 180, "genero": "Masculino"})
-    return preparar_resposta_frontend({"sucesso": True, "mensagem": "Admin criado"})
+    """Setup inicial de conta admin."""
+    if db.usuarios.find_one({"usuario": "admin"}): 
+        return {"sucesso": False, "mensagem": "Admin já existe!"}
+    
+    db.usuarios.insert_one({
+        "usuario": "admin", 
+        "senha": "123", 
+        "nome": "Super Admin", 
+        "is_admin": True, 
+        "status": "ativo", 
+        "avaliacoes_restantes": 9999, 
+        "historico_dossies": [], 
+        "peso": 80.0, 
+        "altura": 180, 
+        "genero": "Masculino"
+    })
+    return {"sucesso": True, "mensagem": "Admin criado"}
 
-@app.get("/admin/listar")
+@app.get("/admin/listar", tags=["Admin"])
 def listar_usuarios():
+    """Lista todos os usuários (apenas Admin deve acessar, na prática)."""
     users = list(db.usuarios.find())
     for u in users: u['_id'] = str(u['_id'])
-    return preparar_resposta_frontend({"sucesso": True, "usuarios": users})
+    return {"sucesso": True, "usuarios": users}
 
-@app.post("/admin/editar")
-def editar_usuario(dados: dict):
-    db.usuarios.update_one({"usuario": dados['target_user']}, {"$set": {"status": dados.get('status'), "avaliacoes_restantes": int(dados.get('creditos', 0))}})
-    return preparar_resposta_frontend({"sucesso": True})
+@app.post("/admin/editar", tags=["Admin"])
+def editar_usuario(dados: AdminUserEdit):
+    """Edita saldo ou status de um usuário."""
+    update_fields = {}
+    if dados.status: update_fields["status"] = dados.status
+    if dados.creditos is not None: update_fields["avaliacoes_restantes"] = dados.creditos
+    
+    if update_fields:
+        db.usuarios.update_one({"usuario": dados.target_user}, {"$set": update_fields})
+    return {"sucesso": True}
 
-@app.post("/admin/excluir")
-def excluir_usuario(dados: dict):
-    db.usuarios.delete_one({"usuario": dados['target_user']})
-    return preparar_resposta_frontend({"sucesso": True})
+@app.post("/admin/excluir", tags=["Admin"])
+def excluir_usuario(dados: AdminUserEdit):
+    """Remove um usuário do sistema."""
+    db.usuarios.delete_one({"usuario": dados.target_user})
+    return {"sucesso": True}
 
-# --- ENDPOINT: BAIXAR PDF ---
+# --- ROTAS: EXPORTAÇÃO (PDF) ---
 
-@app.get("/analise/baixar-pdf/{usuario}")
+@app.get("/analise/baixar-pdf/{usuario}", tags=["Analise"])
 def baixar_pdf_completo(usuario: str):
+    """Gera e retorna PDF do último protocolo."""
     try:
         user = db.usuarios.find_one({"usuario": usuario})
-        if not user or not user.get('historico_dossies'): raise HTTPException(404, "Sem relatório.")
+        if not user or not user.get('historico_dossies'): 
+            raise HTTPException(404, "Sem relatório.")
+        
         dossie = user['historico_dossies'][-1]
         raw = dossie.get('conteudo_bruto', {})
         json_data = raw.get('json_full', {}) if isinstance(raw.get('json_full'), dict) else {}
 
-        pdf = ModernPDF()
+        pdf = PDFService()
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(255, 255, 255)
-        pdf.cell(0, 10, sanitizar_texto(f"ATLETA: {user.get('nome', 'N/A').upper()}"), ln=True)
+        pdf.cell(0, 10, pdf.sanitizar_texto(f"ATLETA: {user.get('nome', 'N/A').upper()}"), ln=True)
         pdf.set_font("Helvetica", "", 10)
         pdf.set_text_color(180, 180, 180)
         pdf.cell(0, 5, f"DATA: {dossie.get('data', 'N/A')}", ln=True)
-        pdf.cell(0, 5, f"OBJETIVO: {sanitizar_texto(json_data.get('avaliacao', {}).get('insight', 'Alta Performance')[:50])}...", ln=True)
+        pdf.cell(0, 5, f"OBJETIVO: {pdf.sanitizar_texto(json_data.get('avaliacao', {}).get('insight', 'Alta Performance')[:50])}...", ln=True)
         pdf.ln(10)
 
+        # Seção 1: Avaliação
         pdf.draw_section_title("1. ANALISE CORPORAL COMPLETA", icon="O")
         av = json_data.get('avaliacao', {})
         seg = av.get('segmentacao', {})
@@ -882,8 +1110,9 @@ def baixar_pdf_completo(usuario: str):
         pdf.ln(2)
         pdf.set_text_color(0, 255, 200)
         pdf.set_font("Helvetica", "B", 10)
-        pdf.multi_cell(0, 6, sanitizar_texto(f">> INSIGHT: {av.get('insight', '')}"))
+        pdf.multi_cell(0, 6, pdf.sanitizar_texto(f">> INSIGHT: {av.get('insight', '')}"))
 
+        # Seção 2: Dieta
         pdf.add_page()
         pdf.draw_section_title("2. PROTOCOLO NUTRICIONAL", icon="U")
         dieta = json_data.get('dieta', [])
@@ -893,21 +1122,22 @@ def baixar_pdf_completo(usuario: str):
                 pdf.set_fill_color(50, 50, 60)
                 pdf.set_text_color(16, 185, 129)
                 pdf.set_font("Helvetica", "B", 10)
-                pdf.cell(0, 8, sanitizar_texto(f"{dia.get('dia', '').upper()} | {dia.get('foco_nutricional', '').upper()}"), 0, 1, 'L', True)
+                pdf.cell(0, 8, pdf.sanitizar_texto(f"{dia.get('dia', '').upper()} | {dia.get('foco_nutricional', '').upper()}"), 0, 1, 'L', True)
                 pdf.set_fill_color(35, 35, 40)
                 pdf.set_text_color(230, 230, 230)
                 for ref in dia.get('refeicoes', []):
                     pdf.set_font("Helvetica", "B", 9)
-                    pdf.cell(30, 6, f"{sanitizar_texto(ref.get('horario',''))}:", 0, 0, 'L', True)
+                    pdf.cell(30, 6, f"{pdf.sanitizar_texto(ref.get('horario',''))}:", 0, 0, 'L', True)
                     pdf.set_font("Helvetica", "", 9)
-                    pdf.multi_cell(0, 6, sanitizar_texto(ref.get('alimentos','')), fill=True)
+                    pdf.multi_cell(0, 6, pdf.sanitizar_texto(ref.get('alimentos','')), fill=True)
                 pdf.set_font("Helvetica", "I", 8)
                 pdf.set_text_color(150, 150, 150)
-                pdf.cell(0, 6, sanitizar_texto(f"Macros: {dia.get('macros_totais', '')}"), 0, 1, 'R', True)
+                pdf.cell(0, 6, pdf.sanitizar_texto(f"Macros: {dia.get('macros_totais', '')}"), 0, 1, 'R', True)
                 pdf.set_draw_color(30, 30, 30)
                 pdf.line(10, pdf.get_y()+2, 200, pdf.get_y()+2)
                 pdf.ln(2)
 
+        # Seção 3: Treino
         pdf.add_page()
         pdf.draw_section_title("3. PLANILHA DE TREINO", icon="X")
         treino = json_data.get('treino', [])
@@ -917,14 +1147,14 @@ def baixar_pdf_completo(usuario: str):
                 pdf.set_fill_color(50, 50, 60)
                 pdf.set_text_color(0, 255, 200)
                 pdf.set_font("Helvetica", "B", 10)
-                pdf.cell(0, 8, sanitizar_texto(f"{item.get('dia','').upper()} - {item.get('foco','').upper()}"), 0, 1, 'L', True)
+                pdf.cell(0, 8, pdf.sanitizar_texto(f"{item.get('dia','').upper()} - {item.get('foco','').upper()}"), 0, 1, 'L', True)
                 pdf.set_fill_color(35, 35, 40)
                 pdf.set_text_color(230, 230, 230)
                 pdf.set_font("Helvetica", "", 9)
                 for ex in item.get('exercicios', []):
-                    nome_ex = sanitizar_texto(ex.get('nome', ''))
-                    series = sanitizar_texto(ex.get('series_reps', ''))
-                    execucao = sanitizar_texto(ex.get('execucao', ''))
+                    nome_ex = pdf.sanitizar_texto(ex.get('nome', ''))
+                    series = pdf.sanitizar_texto(ex.get('series_reps', ''))
+                    execucao = pdf.sanitizar_texto(ex.get('execucao', ''))
                     pdf.cell(0, 5, f"  > {nome_ex} [{series}]", 0, 1, 'L', True)
                     if execucao:
                         pdf.set_font("Helvetica", "I", 8)
@@ -937,6 +1167,7 @@ def baixar_pdf_completo(usuario: str):
                 pdf.line(10, pdf.get_y()+2, 200, pdf.get_y()+2)
                 pdf.ln(2)
 
+        # Seção 4: Suplementos
         pdf.add_page()
         pdf.draw_section_title("4. SUPLEMENTACAO", icon="+")
         suple = json_data.get('suplementacao', [])
@@ -954,22 +1185,42 @@ def baixar_pdf_completo(usuario: str):
         return StreamingResponse(pdf_buffer, media_type="application/pdf", headers=headers)
 
     except Exception as e:
-        print(f"ERRO CRÍTICO PDF: {e}")
+        logger.error(f"ERRO CRÍTICO PDF: {e}")
         raise HTTPException(500, f"Erro PDF: {str(e)}")
 
-# --- CHAT ---
-@app.get("/chat/usuarios")
+# --- ROTAS: CHAT ---
+
+@app.get("/chat/usuarios", tags=["Chat"])
 def listar_usuarios_chat(usuario_atual: str):
-    users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
-    return preparar_resposta_frontend({"sucesso": True, "usuarios": users})
+    """Lista usuários disponíveis para chat (exceto o próprio)."""
+    users = list(db.usuarios.find(
+        {"usuario": {"$ne": usuario_atual}}, 
+        {"usuario": 1, "nome": 1, "_id": 0}
+    ))
+    return {"sucesso": True, "usuarios": users}
 
-@app.get("/chat/mensagens")
+@app.get("/chat/mensagens", tags=["Chat"])
 def pegar_mensagens(user1: str, user2: str):
-    msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
+    """Recupera histórico de mensagens entre dois usuários."""
+    msgs = list(db.chat.find({
+        "$or": [
+            {"remetente": user1, "destinatario": user2}, 
+            {"remetente": user2, "destinatario": user1}
+        ]
+    }).sort("timestamp", ASCENDING))
+    
+    # Conversão manual de ID necessária aqui pois não usamos Pydantic response model no list
     for m in msgs: m['_id'] = str(m['_id'])
-    return preparar_resposta_frontend({"sucesso": True, "mensagens": msgs})
+    
+    return {"sucesso": True, "mensagens": msgs}
 
-@app.post("/chat/enviar")
-def enviar_mensagem(dados: dict):
-    db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
-    return preparar_resposta_frontend({"sucesso": True})
+@app.post("/chat/enviar", tags=["Chat"])
+def enviar_mensagem(dados: ChatMessageRequest):
+    """Envia uma nova mensagem no chat."""
+    db.chat.insert_one({
+        "remetente": dados.remetente,
+        "destinatario": dados.destinatario,
+        "texto": dados.texto,
+        "timestamp": datetime.now().isoformat()
+    })
+    return {"sucesso": True}
