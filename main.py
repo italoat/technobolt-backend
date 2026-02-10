@@ -383,14 +383,14 @@ async def executar_analise(
         peso_float = float(peso_clean)
         
         altura_clean = str(altura).replace(',', '.').replace('cm', '').strip()
-        altura_float = float(altura_clean)
-        if altura_float > 3.0: # Se usuário digitou em cm (180), converte pra m (1.80) para cálculo IMC se necessário, mas guarda o int
-             altura_int = int(altura_float)
+        altura_val = float(altura_clean)
+        if altura_val < 3.0: 
+             altura_int = int(altura_val * 100)
         else:
-             altura_int = int(altura_float * 100)
+             altura_int = int(altura_val)
              
     except ValueError:
-        peso_float = 70.0 # Valores de fallback seguros
+        peso_float = 70.0 
         altura_int = 175
 
     # Atualiza dados no banco
@@ -414,11 +414,10 @@ async def executar_analise(
     content = await foto.read()
     img_otimizada = otimizar_imagem(content, quality=85, size=(800, 800))
     
-    # Cálculo do IMC para contexto
-    altura_m = altura_int / 100
-    imc = peso_float / (altura_m**2) if altura_m > 0 else 24.0
+    altura_m = altura_int / 100 if altura_int > 0 else 1.70
+    imc = peso_float / (altura_m**2)
     
-    # [PROMPT MESTRE - ATUALIZADO E BLINDADO]
+    # [PROMPT MESTRE - OTIMIZADO PARA JUSTIFICATIVAS E SUPERÁVIT]
     prompt_mestre = f"""
     VOCÊ É UM TREINADOR DE ELITE E NUTRICIONISTA PhD.
     SUA MISSÃO: CRIAR O PROTOCOLO PERFEITO PARA MAXIMIZAR RESULTADOS (Hipertrofia/Definição).
@@ -433,15 +432,15 @@ async def executar_analise(
        - Use APENAS exercícios desta lista: [ {EXERCISE_LIST_STRING} ]
        - Se o exercício ideal não estiver na lista, escolha a variação mais próxima da lista.
        - Estrutura: "dia", "foco", e lista de "exercicios".
-       - DENTRO DE CADA EXERCÍCIO, adicione o campo "justificativa_individual": Explique em 1 frase curta por que este exercício foi escolhido para a biomecânica/objetivo DESTA pessoa.
+       - DENTRO DE CADA EXERCÍCIO, adicione o campo "justificativa_individual": Explique de forma individualizada, biomecanicamente, porque este exercício foi escolhido para ESTA pessoa.
        - Campo "execucao": Detalhe técnico.
-       - "treino_insight": Explique a lógica geral da divisão de treino escolhida.
+       - "treino_insight": Explique sobre o porque montou o treino em questão para a pessoa, focando na estratégia adotada.
 
-    2. **DIETA (SUPERÁVIT CALÓRICO/BULKING LIMPO):**
+    2. **DIETA (SUPERÁVIT CALÓRICO):**
        - Calcule o Gasto Energético Total (GET) estimado.
-       - Aplique um Superávit Calórico de +300 a +500 kcal (salvo se o objetivo for estritamente perda de peso severa).
+       - APLIQUE UM SUPERÁVIT CALÓRICO de +300 a +500 kcal (mostre a matemática no insight).
        - Preencha 'macros_totais' explicitando o superávit (ex: "3200kcal (Superávit) | P: 180g...").
-       - "dieta_insight": Explique o cálculo do superávit para suportar o anabolismo.
+       - "dieta_insight": Explique o cálculo do superávit para suportar o anabolismo, mostrando os números base.
 
     3. **RETORNO JSON PURO:** Sem markdown (```json), sem texto antes ou depois.
 
@@ -515,7 +514,6 @@ async def executar_analise(
     else:
         db.usuarios.update_one({"usuario": usuario}, {"$push": {"historico_dossies": dossie}})
     
-    # Sanitização FINAL e OBRIGATÓRIA antes de enviar para o Flutter
     return preparar_resposta_frontend({"sucesso": True, "resultado": dossie})
 
 @app.post("/analise/regenerar-secao")
@@ -558,7 +556,7 @@ def regenerar_secao(dados: dict):
             1. USE **APENAS** EXERCÍCIOS DESTA LISTA: [ {EXERCISE_LIST_STRING} ]
             2. VOLUME ALTO: Gere entre **6 a 9 exercícios**.
             3. Título do dia: APENAS "{dia_alvo}".
-            4. JUSTIFICATIVA INDIVIDUAL: Em cada exercício, explique o motivo da escolha.
+            4. JUSTIFICATIVA INDIVIDUAL: Explique porque escolheu este exercício para a pessoa.
             
             RETORNE APENAS O JSON DO OBJETO DO DIA:
             {{ 
@@ -578,7 +576,7 @@ def regenerar_secao(dados: dict):
             CONTEXTO: {r_a}.
             REGRAS: 
             1. NÃO retorne campos nulos. 
-            2. MANTENHA O SUPERÁVIT CALÓRICO calculado anteriormente (Bulking), exceto se solicitado o contrário.
+            2. MANTENHA O SUPERÁVIT CALÓRICO calculado anteriormente.
             3. Preencha 'macros_totais'.
             
             RETORNE APENAS O JSON DO DIA:
@@ -598,7 +596,7 @@ def regenerar_secao(dados: dict):
         - VOLUME DE TREINO: 6 a 9 exercícios por dia.
         - Sem dados nulos. 
         - Títulos dos dias apenas o nome da semana.
-        - Se for dieta, inclua 'macros_totais' com SUPERÁVIT CALÓRICO para ganho de massa.
+        - Se for dieta, inclua 'macros_totais' com SUPERÁVIT CALÓRICO.
         - Se for treino, inclua 'justificativa_individual' nos exercícios.
         RETORNE JSON: {{ "{secao}": [ ... ] }}
         """
@@ -692,7 +690,7 @@ def get_feed():
         p['likes'] = p.get('likes', [])
         p['comentarios'] = p.get('comentarios', [])
         p['medalha'] = calcular_medalha(p.get('autor'))
-    return preparing_resposta_frontend({"sucesso": True, "feed": posts})
+    return preparar_resposta_frontend({"sucesso": True, "feed": posts})
 
 @app.post("/social/postar")
 async def postar_feed(usuario: str = Form(...), legenda: str = Form(...), imagem: UploadFile = File(...)):
@@ -727,7 +725,7 @@ def deletar_post_social(dados: dict):
         except: return preparar_resposta_frontend({"sucesso": False, "mensagem": "ID inválido"})
         result = db.posts.delete_one({"_id": oid, "autor": usuario})
         return preparar_resposta_frontend({"sucesso": True} if result.deleted_count > 0 else {"sucesso": False})
-    except Exception as e: return preparing_resposta_frontend({"sucesso": False, "mensagem": str(e)})
+    except Exception as e: return preparar_resposta_frontend({"sucesso": False, "mensagem": str(e)})
         
 @app.post("/social/curtir")
 def curtir_post(dados: dict):
@@ -965,15 +963,15 @@ def baixar_pdf_completo(usuario: str):
 @app.get("/chat/usuarios")
 def listar_usuarios_chat(usuario_atual: str):
     users = list(db.usuarios.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
-    return preparing_resposta_frontend({"sucesso": True, "usuarios": users})
+    return preparar_resposta_frontend({"sucesso": True, "usuarios": users})
 
 @app.get("/chat/mensagens")
 def pegar_mensagens(user1: str, user2: str):
     msgs = list(db.chat.find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
     for m in msgs: m['_id'] = str(m['_id'])
-    return preparing_resposta_frontend({"sucesso": True, "mensagens": msgs})
+    return preparar_resposta_frontend({"sucesso": True, "mensagens": msgs})
 
 @app.post("/chat/enviar")
 def enviar_mensagem(dados: dict):
     db.chat.insert_one({"remetente": dados['remetente'], "destinatario": dados['destinatario'], "texto": dados['texto'], "timestamp": datetime.now().isoformat()})
-    return preparing_resposta_frontend({"sucesso": True})
+    return preparar_resposta_frontend({"sucesso": True})
