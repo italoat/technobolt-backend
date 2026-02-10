@@ -8,6 +8,7 @@ import logging
 import difflib
 import urllib.parse
 import unicodedata
+import time
 from datetime import datetime
 from typing import List, Optional, Any, Dict, Union
 
@@ -50,9 +51,9 @@ class Settings:
     MONGO_HOST = os.environ.get("MONGO_HOST", "cluster0.zbjsvk6.mongodb.net")
     DB_NAME = "technoboltgym"
     API_TITLE = "TechnoBolt Gym Hub API"
-    API_VERSION = "93.0-Elite-Max-Performance"
+    API_VERSION = "96.0-Elite-Senior-Final"
     
-    # Rotação de chaves de API para balanceamento de carga e alta disponibilidade
+    # Rotação de chaves de API para balanceamento de carga
     GEMINI_KEYS = [
         os.environ.get(f"GEMINI_CHAVE_{i}") 
         for i in range(1, 8) 
@@ -61,8 +62,14 @@ class Settings:
 
 settings = Settings()
 
-# --- MOTORES DE IA (MANTIDOS ESTRITAMENTE IGUAIS) ---
-MOTORES_TECHNOBOLT = ["models/gemini-3-flash-preview", "models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-flash-latest"]
+# --- MOTORES DE IA (MANTIDOS ESTRITAMENTE CONFORME SOLICITADO) ---
+MOTORES_TECHNOBOLT = [
+    "models/gemini-3-flash-preview", 
+    "models/gemini-2.5-flash", 
+    "models/gemini-2.0-flash", 
+    "models/gemini-flash-latest"
+]
+
 # --- CAMADA DE DADOS: CONEXÃO MONGODB ---
 class Database:
     """Gerenciador Singleton de conexão com o Banco de Dados."""
@@ -172,8 +179,55 @@ carregar_exercicios()
 
 # --- SERVIÇOS (LÓGICA DE NEGÓCIO) ---
 
+def reparar_json_quebrado(texto: str) -> str:
+    """Tenta consertar erros comuns de JSON gerados por LLMs em textos longos."""
+    # Remove vírgulas trailing em listas e objetos (ex: [1, 2,] -> [1, 2])
+    texto = re.sub(r',\s*([\]}])', r'\1', texto)
+    
+    # Tenta fechar chaves ou colchetes se o texto foi cortado (truncado)
+    # Isso é comum se o output exceder max_tokens
+    abertos_chave = texto.count('{') - texto.count('}')
+    if abertos_chave > 0:
+        texto += '}' * abertos_chave
+        
+    abertos_colchete = texto.count('[') - texto.count(']')
+    if abertos_colchete > 0:
+        texto += ']' * abertos_colchete
+        
+    return texto
+
+def limpar_e_parsear_json(texto_ia: str) -> dict:
+    """
+    Parser robusto para extrair JSON de respostas da IA.
+    Lida com blocos de código Markdown, texto introdutório e erros de sintaxe.
+    """
+    try:
+        # 1. Extração do bloco JSON usando Regex (Do primeiro '{' ao último '}')
+        # O re.DOTALL permite que o ponto (.) case com quebras de linha
+        match = re.search(r'\{.*\}', texto_ia, re.DOTALL)
+        
+        if match:
+            texto_limpo = match.group(0)
+        else:
+            # Fallback: remove markdown de código se o regex falhar
+            texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
+
+        # 2. Primeira tentativa de parse direto
+        return json.loads(texto_limpo)
+        
+    except json.JSONDecodeError as e:
+        logger.warning(f"⚠️ Erro de sintaxe JSON inicial: {e}. Tentando reparo automático...")
+        try:
+            # 3. Tentativa de Reparo
+            texto_reparado = reparar_json_quebrado(texto_limpo)
+            return json.loads(texto_reparado)
+        except json.JSONDecodeError as e2:
+            logger.error(f"❌ Falha no reparo JSON. Erro: {e2}")
+            # Re-lança para que o mecanismo de Retry tente outro modelo/prompt
+            raise e2
+
 class AIService:
-    """Gerencia interações com a API do Google Gemini com fallback e retry."""
+    """Gerencia interações com a API do Google Gemini com fallback, retry e validação de JSON."""
     
     @staticmethod
     def _get_api_key():
@@ -185,43 +239,70 @@ class AIService:
         return key
 
     @staticmethod
-    def generate_content(prompt: str, image_bytes: Optional[bytes] = None) -> Optional[str]:
+    def generate_valid_json(prompt: str, image_bytes: Optional[bytes] = None, max_retries: int = 3) -> Dict:
         """
-        Executa uma requisição para a IA.
-        Itera sobre modelos disponíveis em caso de falha.
+        Gera conteúdo e garante que o retorno seja um JSON válido.
+        Se falhar no parseamento, tenta novamente (Retry Pattern).
         """
-        api_key = AIService._get_api_key()
-        if not api_key:
-            return None
-
-        img_blob = {"mime_type": "image/jpeg", "data": image_bytes} if image_bytes else None
-        
-        genai.configure(api_key=api_key)
-        
-        for modelo in MOTORES_TECHNOBOLT:
+        for attempt in range(max_retries):
             try:
-                logger.info(f"🧠 [IA] Iniciando inferência com modelo: {modelo}")
+                api_key = AIService._get_api_key()
+                if not api_key: raise Exception("Sem chaves de API")
+                genai.configure(api_key=api_key)
+
+                # Round Robin de Modelos
+                modelo = MOTORES_TECHNOBOLT[attempt % len(MOTORES_TECHNOBOLT)]
+                logger.info(f"🧠 [IA] Tentativa {attempt+1}/{max_retries} usando {modelo}...")
+
                 model = genai.GenerativeModel(modelo)
                 
+                # Configuração ajustada para reduzir erros de sintaxe e permitir respostas longas
                 config = genai.types.GenerationConfig(
-                    response_mime_type="application/json" if "json" in prompt.lower() else "text/plain",
-                    max_output_tokens=8192, # Tokens altos para permitir respostas longas (7 dias de dieta/treino)
-                    temperature=0.7 # Criatividade balanceada com precisão
+                    response_mime_type="application/json", 
+                    max_output_tokens=8192,
+                    temperature=0.7 if attempt == 0 else 0.4 # Reduz criatividade nos retries para focar em sintaxe
                 )
                 
-                inputs = [prompt, img_blob] if img_blob else [prompt]
+                inputs = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}] if image_bytes else [prompt]
+                
                 response = model.generate_content(inputs, generation_config=config)
                 
-                if response and response.text:
-                    logger.info(f"✅ [IA] Sucesso na geração com {modelo}")
-                    return response.text
-                    
+                if not response or not response.text:
+                    raise Exception("Resposta vazia da IA")
+
+                # Parseamento e Validação
+                return limpar_e_parsear_json(response.text)
+
             except Exception as e:
-                logger.warning(f"⚠️ Falha no modelo {modelo}: {e}. Tentando próximo modelo...")
-                continue
-                
-        logger.error("❌ Todos os modelos de IA falharam. Serviço indisponível.")
-        return None
+                logger.warning(f"⚠️ Erro na tentativa {attempt+1}: {e}. Retentando em breve...")
+                time.sleep(1 + attempt) # Backoff exponencial simples
+
+        # Se esgotou todas as tentativas
+        logger.error("❌ Falha crítica: Não foi possível gerar um JSON válido após todas as tentativas.")
+        
+        # Retorna estrutura de fallback para não quebrar o app do usuário com tela vermelha
+        return {
+            "avaliacao": {"insight": "O sistema de IA está sobrecarregado no momento. Por favor, tente novamente em instantes."},
+            "dieta": [],
+            "treino": [],
+            "suplementacao": []
+        }
+
+    # Método genérico para textos simples (chat, comentários)
+    @staticmethod
+    def generate_content(prompt: str, image_bytes: Optional[bytes] = None) -> Optional[str]:
+        # Para texto livre (comentários), usamos uma config mais simples
+        try:
+            api_key = AIService._get_api_key()
+            genai.configure(api_key=api_key)
+            model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1]) # Usa o último modelo (stable) para tarefas simples
+            
+            inputs = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}] if image_bytes else [prompt]
+            response = model.generate_content(inputs)
+            return response.text if response else None
+        except Exception as e:
+            logger.error(f"Erro na geração de texto simples: {e}")
+            return None
 
 class ImageService:
     """Utilitários para processamento e otimização de imagens."""
@@ -230,22 +311,16 @@ class ImageService:
     def optimize(file_bytes: bytes, quality: int = 70, size: tuple = (800, 800)) -> bytes:
         try:
             with Image.open(io.BytesIO(file_bytes)) as img:
-                # Corrige orientação baseada em EXIF (comum em fotos de celular)
                 img = ImageOps.exif_transpose(img)
-                
-                # Converte para RGB (remove alpha/transparência se houver)
                 if img.mode != 'RGB':
                     img = img.convert("RGB")
-                
-                # Redimensiona mantendo proporção (thumbnail)
                 img.thumbnail(size)
-                
                 output = io.BytesIO()
                 img.save(output, format='JPEG', quality=quality, optimize=True)
                 return output.getvalue()
         except Exception as e:
             logger.error(f"Erro ao otimizar imagem: {e}")
-            return file_bytes # Retorna original em caso de erro para não quebrar fluxo
+            return file_bytes
 
 class PDFService(FPDF):
     """Gerador de relatórios PDF customizado para a identidade visual TechnoBolt."""
@@ -264,7 +339,6 @@ class PDFService(FPDF):
     def sanitizar_texto(self, texto: Any) -> str:
         if not texto: return ""
         texto = str(texto)
-        # Mapeamento de emojis e caracteres especiais para ASCII/Latin-1
         subs = {
             "🚀": ">>", "✅": "[OK]", "⚠️": "[!]", 
             "💊": "", "🥗": "", "🏋️": "", "📊": "",
@@ -273,8 +347,6 @@ class PDFService(FPDF):
         }
         for k, v in subs.items():
             texto = texto.replace(k, v)
-        
-        # Encoding agressivo para evitar crash do FPDF
         return texto.encode('latin-1', 'replace').decode('latin-1')
 
     def header(self):
@@ -339,7 +411,6 @@ app = FastAPI(
     ]
 )
 
-# Configuração de CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -351,7 +422,6 @@ app.add_middleware(
 # --- HELPERS DE LÓGICA DE NEGÓCIO ---
 
 def normalizar_texto(texto: str) -> str:
-    """Remove acentos e coloca em minúsculas para comparação robusta de strings."""
     if not texto: return ""
     if not isinstance(texto, str): texto = str(texto)
     return "".join(c for c in unicodedata.normalize('NFD', texto) 
@@ -361,14 +431,12 @@ def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
     """
     BLINDAGEM DO SISTEMA DE EXERCÍCIOS.
     Garante que o exercício sugerido pela IA corresponda a uma imagem no banco local.
-    Usa correspondência exata, similaridade (difflib) e busca por substring.
     """
     if not lista_exercicios or not EXERCISE_DB: 
         return lista_exercicios
     
     base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
     
-    # Mapas para busca O(1) e recuperação do nome formatado
     db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
     db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
 
@@ -381,22 +449,21 @@ def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
         pasta_github = None
         nome_final = str(nome_ia)
 
-        # 1. Tentativa de Match Exato
+        # 1. Match Exato
         if nome_ia_norm in db_map_norm:
             pasta_github = db_map_norm[nome_ia_norm]
             nome_final = db_title_map[nome_ia_norm].title()
         else:
-            # 2. Match por Similaridade (Difflib) - Corrige erros de digitação da IA
+            # 2. Similaridade
             matches = difflib.get_close_matches(nome_ia_norm, db_map_norm.keys(), n=1, cutoff=0.6)
             if matches:
                 match_key = matches[0]
                 pasta_github = db_map_norm[match_key]
                 nome_final = db_title_map[match_key].title()
             else:
-                # 3. Match por Substring (Busca parcial)
+                # 3. Substring
                 melhor_candidato = None
                 for key in db_map_norm.keys():
-                    # Evita matches curtos demais (ex: "remada" vs "remada alta")
                     if (key in nome_ia_norm and len(key) > 4) or (nome_ia_norm in key and len(nome_ia_norm) > 4): 
                         melhor_candidato = key
                         break
@@ -405,8 +472,7 @@ def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
                     pasta_github = db_map_norm[melhor_candidato]
                     nome_final = db_title_map[melhor_candidato].title()
                 else:
-                    # 4. Fallback (Polichinelo) - Garante que não quebra, mas avisa
-                    # Em um sistema hardcore, poderíamos remover o exercício, mas substituiremos por um genérico seguro.
+                    # 4. Fallback Seguro
                     fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
                     pasta_github = db_map_norm[fallback_key]
                     nome_final = f"{nome_ia} (Adaptado)"
@@ -426,7 +492,6 @@ def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
     return exercicios_corrigidos
 
 def calcular_medalha(username: str) -> str:
-    """Calcula a medalha do usuário baseada em pontos (Gamification)."""
     try:
         user = db.usuarios.find_one({"usuario": username})
         if not user: return ""
@@ -438,38 +503,10 @@ def calcular_medalha(username: str) -> str:
     except Exception:
         return ""
 
-def limpar_e_parsear_json(texto_ia: str) -> dict:
-    """
-    Parser robusto para extrair JSON de respostas da IA.
-    Lida com blocos de código Markdown e texto introdutório.
-    """
-    try:
-        # Regex para extrair apenas o objeto JSON {} mais externo
-        match = re.search(r'\{.*\}', texto_ia, re.DOTALL)
-        if match:
-            texto_limpo = match.group(0)
-        else:
-            # Fallback de limpeza manual se o Regex falhar
-            texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
-
-        parsed = json.loads(texto_limpo)
-        return parsed 
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Erro de parse JSON: {e}. Texto recebido: {texto_ia[:200]}...")
-        # Retorna estrutura de segurança para não quebrar o frontend
-        return {
-            "avaliacao": {"insight": "Houve uma instabilidade na análise, mas geramos um protocolo base."},
-            "dieta": [],
-            "suplementacao": [],
-            "treino": []
-        }
-
 # --- ROTAS: AUTH & PERFIL ---
 
 @app.post("/auth/login", tags=["Auth"], response_model=Dict[str, Any])
 def login(dados: UserLogin):
-    """Autentica o usuário e retorna perfil completo."""
     user = db.usuarios.find_one({"usuario": dados.usuario, "senha": dados.senha})
     
     if not user:
@@ -499,7 +536,6 @@ def login(dados: UserLogin):
 
 @app.post("/auth/registro", tags=["Auth"])
 def registrar(dados: UserRegister):
-    """Cria um novo usuário no sistema."""
     if db.usuarios.find_one({"usuario": dados.usuario}):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Usuário já existe")
     
@@ -517,14 +553,9 @@ def registrar(dados: UserRegister):
 
 @app.post("/perfil/atualizar", tags=["Perfil"])
 def atualizar_perfil(dados: UserUpdate):
-    """Atualiza informações cadastrais do usuário."""
     update_data = {k: v for k, v in dados.model_dump(exclude={'usuario'}).items() if v is not None}
-    
     result = db.usuarios.update_one({"usuario": dados.usuario}, {"$set": update_data})
-    
-    if result.matched_count == 0:
-        raise HTTPException(404, "Usuário não encontrado")
-        
+    if result.matched_count == 0: raise HTTPException(404, "Usuário não encontrado")
     return {"sucesso": True}
 
 # --- ROTAS: ANÁLISE IA (CORE) ---
@@ -542,11 +573,9 @@ async def executar_analise(
 ):
     """
     GERADOR DE PROTOCOLO MASTER.
-    Esta função coordena a análise biométrica, dietética e de treinamento.
-    Utiliza prompts avançados para garantir volume de treino e adesão à dieta.
     """
     
-    # 1. Tratamento e Validação de Inputs com Fallback
+    # 1. Tratamento e Validação de Inputs
     try:
         peso_clean = str(peso).replace(',', '.')
         peso_float = float(peso_clean)
@@ -559,11 +588,10 @@ async def executar_analise(
              altura_int = int(altura_val)
              
     except ValueError:
-        logger.warning(f"Erro ao converter medidas para user {usuario}. Usando valores padrão seguros.")
         peso_float = 70.0 
         altura_int = 175
 
-    # 2. Atualiza dados básicos no banco para persistência
+    # 2. Atualiza dados no banco
     db.usuarios.update_one(
         {"usuario": usuario}, 
         {"$set": {
@@ -575,7 +603,7 @@ async def executar_analise(
         }}
     )
 
-    # 3. Busca contexto existente (histórico médico/restrições)
+    # 3. Busca contexto
     user_data = db.usuarios.find_one({"usuario": usuario})
     if not user_data:
         raise HTTPException(404, "Usuário não encontrado após update.")
@@ -585,16 +613,14 @@ async def executar_analise(
     r_f = user_data.get('restricoes_fis', 'Nenhuma')
     info = observacoes 
 
-    # 4. Processamento de Imagem (Compressão e Otimização para a IA)
+    # 4. Processamento de Imagem
     content = await foto.read()
     img_otimizada = ImageService.optimize(content, quality=85, size=(800, 800))
     
     altura_m = altura_int / 100 if altura_int > 0 else 1.70
     imc = peso_float / (altura_m**2)
     
-    # 5. ENGENHARIA DE PROMPT (SENIOR LEVEL)
-    # O prompt abaixo é estruturado para forçar a IA a agir como especialista e seguir restrições estritas.
-    
+    # 5. ENGENHARIA DE PROMPT (SENIOR LEVEL - OTIMIZADO)
     prompt_mestre = f"""
     ROLE: YOU ARE A HARDCORE ELITE BODYBUILDING COACH AND PHD NUTRITIONIST.
     YOUR MISSION: CREATE THE ULTIMATE TRANSFORMATION PROTOCOL FOR THIS CLIENT. NO MEDIOCRITY.
@@ -630,8 +656,10 @@ async def executar_analise(
        - "treino_insight": Explain the periodization strategy used (Push/Pull/Legs, Upper/Lower, etc.).
 
     3. **OUTPUT FORMAT:**
-       - Return ONLY valid JSON. No Markdown formatting like ```json. No intro text.
-       - Ensure no null values. Fill everything with expert advice.
+       - Return ONLY valid JSON. 
+       - CRITICAL: ENSURE ALL JSON SYNTAX IS CORRECT. Double check commas between objects.
+       - Do not use control characters that break JSON.
+       - Ensure no null values.
 
     --- JSON SCHEMA ---
     {{
@@ -651,7 +679,7 @@ async def executar_analise(
             ],
             "macros_totais": "2500kcal | P: 180g | C: 300g | G: 60g"
         }},
-        ... (REPEAT FOR TERÇA, QUARTA, QUINTA, SEXTA, SÁBADO, DOMINGO) ...
+        ... (REPEAT FOR TERÇA, QUARTA, QUINTA, SEXTA, SABADO, DOMINGO) ...
       ],
       "dieta_insight": "Txt",
       "suplementacao": [ {{ "nome": "Creatina", "dose": "5g", "horario": "Pós-treino", "motivo": "Txt" }} ],
@@ -678,23 +706,15 @@ async def executar_analise(
     }}
     """
     
-    # Executa IA
-    resultado_raw = AIService.generate_content(prompt_mestre, img_otimizada)
-    if not resultado_raw: 
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Serviço de IA Indisponível no momento. Tente novamente.")
-
-    # Parseia JSON
-    conteudo_json = limpar_e_parsear_json(resultado_raw)
+    # Executa IA com Retry Automático para garantir JSON válido
+    conteudo_json = AIService.generate_valid_json(prompt_mestre, img_otimizada)
 
     # 6. Pós-processamento e Blindagem de Exercícios
-    # Garante que os nomes dos exercícios batam com o banco local para exibir imagens
     if 'treino' in conteudo_json and isinstance(conteudo_json['treino'], list):
         for dia in conteudo_json['treino']:
-            # Limpa nome do dia
             if 'dia' in dia:
                 dia['dia'] = str(dia['dia']).split('-')[0].split(' ')[0].replace(',', '').strip()
 
-            # Valida e anexa imagens aos exercícios
             if 'exercicios' in dia and isinstance(dia['exercicios'], list):
                 dia['exercicios'] = validar_e_corrigir_exercicios(dia['exercicios'])
 
@@ -704,7 +724,6 @@ async def executar_analise(
         "peso_reg": peso_float,
         "conteudo_bruto": {
             "json_full": conteudo_json,
-            # Mantém compatibilidade com versões antigas do app que buscam strings r1..r4
             "r1": str(conteudo_json.get('avaliacao', {}).get('insight', '')),
             "r2": str(conteudo_json.get('dieta_insight', '')),
             "r3": str(conteudo_json.get('suplementacao_insight', '')),
@@ -712,7 +731,6 @@ async def executar_analise(
         }
     }
     
-    # Atualiza saldo se não for admin
     update_query = {"$push": {"historico_dossies": dossie}}
     if not user_data.get('is_admin', False):
         update_query["$inc"] = {"avaliacoes_restantes": -1}
@@ -723,10 +741,7 @@ async def executar_analise(
 
 @app.post("/analise/regenerar-secao", tags=["Analise"])
 def regenerar_secao(dados: dict = Body(...)):
-    """
-    Regenera uma parte específica do protocolo.
-    Mantém a consistência de volume (10 exercícios) e dias (Segunda-Sexta ou Domingo).
-    """
+    """Regenera uma parte específica do protocolo."""
     usuario = dados.get("usuario")
     secao = dados.get("secao")
     dia_alvo = dados.get("dia") 
@@ -810,10 +825,8 @@ def regenerar_secao(dados: dict = Body(...)):
         RETURN JSON: {{ "{secao}": [ ... ] }}
         """
 
-    resultado_texto = AIService.generate_content(prompt_regeneracao)
-    if not resultado_texto: return {"sucesso": False, "mensagem": "Erro na IA ao regenerar."}
-
-    novo_dado_ia = limpar_e_parsear_json(resultado_texto)
+    conteudo_json = AIService.generate_valid_json(prompt_regeneracao)
+    novo_dado_ia = conteudo_json
     
     # Valida exercícios novamente se for treino
     if secao == "treino":
@@ -830,7 +843,7 @@ def regenerar_secao(dados: dict = Body(...)):
             
             novo_dado_ia = obj_dia
 
-    # Lógica de atualização no Banco (Merge no JSON existente)
+    # Lógica de atualização no Banco
     updates = {}
     if dia_alvo and secao in ["dieta", "treino"]:
         lista_atual = ultimo_dossie.get('conteudo_bruto', {}).get('json_full', {}).get(secao, [])
@@ -895,11 +908,9 @@ def buscar_historico(usuario: str):
 
 @app.get("/social/feed", tags=["Social"])
 def get_feed():
-    """Retorna o feed de postagens ordenado por data."""
-    # O PyObjectId no Model (se implementado) ou conversão manual aqui
     posts = list(db.posts.find().sort("data", DESCENDING).limit(50))
     for p in posts: 
-        p['_id'] = str(p['_id']) # Conversão explicita ainda necessária se não usar response_model list
+        p['_id'] = str(p['_id'])
         p['likes'] = p.get('likes', [])
         p['comentarios'] = p.get('comentarios', [])
         p['medalha'] = calcular_medalha(p.get('autor'))
@@ -911,7 +922,6 @@ async def postar_feed(
     legenda: str = Form(...), 
     imagem: UploadFile = File(...)
 ):
-    """Cria uma nova postagem com imagem."""
     content = await imagem.read()
     img_otimizada = ImageService.optimize(content, size=(600, 600))
     img_b64 = base64.b64encode(img_otimizada).decode('utf-8')
@@ -927,9 +937,15 @@ async def postar_feed(
     
     post_id = db.posts.insert_one(post_doc).inserted_id
 
-    # Comentário automático da IA
-    prompt_comentario = f"Aja como um personal trainer da TechnoBolt. Comentário curto (máx 15 palavras) para foto com legenda: '{legenda}'"
-    comentario_ia = AIService.generate_content(prompt_comentario, img_otimizada)
+    # Comentário automático (simples string, usa generate_content direto)
+    # Aqui usamos uma versão simplificada do método de IA pois não é JSON
+    try:
+        genai.configure(api_key=AIService._get_api_key())
+        model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1])
+        resp = model.generate_content([f"Comentário curto de personal trainer para: '{legenda}'", {"mime_type": "image/jpeg", "data": img_otimizada}])
+        comentario_ia = resp.text if resp else None
+    except:
+        comentario_ia = None
     
     if comentario_ia:
         db.posts.update_one(
@@ -941,7 +957,6 @@ async def postar_feed(
 
 @app.post("/social/post/deletar", tags=["Social"])
 def deletar_post_social(dados: SocialPostRequest):
-    """Remove uma postagem (apenas o autor pode deletar)."""
     try:
         oid = ObjectId(dados.post_id)
         result = db.posts.delete_one({"_id": oid, "autor": dados.usuario})
@@ -951,7 +966,6 @@ def deletar_post_social(dados: SocialPostRequest):
         
 @app.post("/social/curtir", tags=["Social"])
 def curtir_post(dados: SocialPostRequest):
-    """Alterna like no post (Toggle)."""
     try:
         oid = ObjectId(dados.post_id)
         post = db.posts.find_one({"_id": oid})
@@ -967,7 +981,6 @@ def curtir_post(dados: SocialPostRequest):
         
 @app.post("/social/comentar", tags=["Social"])
 def postar_comentario(dados: SocialCommentRequest):
-    """Adiciona um comentário a uma postagem."""
     try:
         oid = ObjectId(dados.post_id)
         comentario = {
@@ -984,7 +997,6 @@ def postar_comentario(dados: SocialCommentRequest):
 
 @app.get("/social/ranking", tags=["Social"])
 def get_ranking_global():
-    """Retorna top 50 usuários por pontos."""
     users = list(db.usuarios.find(
         {"is_admin": False}, 
         {"nome": 1, "usuario": 1, "pontos": 1, "foto_perfil": 1, "_id": 0}
@@ -993,7 +1005,6 @@ def get_ranking_global():
 
 @app.get("/social/checkins", tags=["Social"])
 def get_checkins(usuario: str):
-    """Retorna calendário de checkins do mês atual."""
     now = datetime.now()
     start_date = datetime(now.year, now.month, 1).isoformat()
     checkins = list(db.checkins.find(
@@ -1014,11 +1025,9 @@ async def validar_conquista(
     tipo: str = Form(...), 
     foto: UploadFile = File(...)
 ):
-    """Valida um treino via IA (Computer Vision) para gamification."""
     now = datetime.now()
     today_start = datetime(now.year, now.month, now.day).isoformat()
     
-    # Limite diário de 1 checkin
     ja_fez = db.checkins.find_one({
         "usuario": usuario, 
         "data": {"$gte": today_start}
@@ -1030,18 +1039,16 @@ async def validar_conquista(
     content = await foto.read()
     img_otimizada = ImageService.optimize(content, size=(800, 800))
     
-    prompt_juiz = f"""
-    ATUE COMO UM JUIZ RIGOROSO DE FITNESS.
-    O usuário diz que fez um treino do tipo: '{tipo}' (gym=academia, home=casa, run=corrida).
-    Analise a imagem anexada.
-    - Se for 'gym', procure equipamentos de academia, espelhos, pesos, roupas de treino.
-    - Se for 'home', procure tapete de yoga, pesos livres, roupa de ginástica em ambiente doméstico.
-    - Se for 'run', procure ambiente externo (rua/parque), esteira, tênis de corrida, suor.
-    IMPORTANTE: Selfies no espelho VALEM se o contexto bater.
-    Responda APENAS: "APROVADO" ou "REPROVADO".
-    """
-    
-    resultado_ia = AIService.generate_content(prompt_juiz, img_otimizada)
+    try:
+        genai.configure(api_key=AIService._get_api_key())
+        model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1])
+        resp = model.generate_content([
+            f"Juiz de fitness: O usuário diz que fez treino '{tipo}'. Analise a foto. Responda APENAS 'APROVADO' ou 'REPROVADO'.", 
+            {"mime_type": "image/jpeg", "data": img_otimizada}
+        ])
+        resultado_ia = resp.text if resp else ""
+    except:
+        resultado_ia = ""
     
     if resultado_ia and "APROVADO" in resultado_ia.upper():
         pontos_ganhos = 50
@@ -1063,7 +1070,6 @@ async def validar_conquista(
 
 @app.get("/setup/criar-admin", tags=["Admin"])
 def criar_admin_inicial():
-    """Setup inicial de conta admin."""
     if db.usuarios.find_one({"usuario": "admin"}): 
         return {"sucesso": False, "mensagem": "Admin já existe!"}
     
@@ -1083,14 +1089,12 @@ def criar_admin_inicial():
 
 @app.get("/admin/listar", tags=["Admin"])
 def listar_usuarios():
-    """Lista todos os usuários (apenas Admin deve acessar, na prática)."""
     users = list(db.usuarios.find())
     for u in users: u['_id'] = str(u['_id'])
     return {"sucesso": True, "usuarios": users}
 
 @app.post("/admin/editar", tags=["Admin"])
 def editar_usuario(dados: AdminUserEdit):
-    """Edita saldo ou status de um usuário."""
     update_fields = {}
     if dados.status: update_fields["status"] = dados.status
     if dados.creditos is not None: update_fields["avaliacoes_restantes"] = dados.creditos
@@ -1101,7 +1105,6 @@ def editar_usuario(dados: AdminUserEdit):
 
 @app.post("/admin/excluir", tags=["Admin"])
 def excluir_usuario(dados: AdminUserEdit):
-    """Remove um usuário do sistema."""
     db.usuarios.delete_one({"usuario": dados.target_user})
     return {"sucesso": True}
 
@@ -1109,7 +1112,6 @@ def excluir_usuario(dados: AdminUserEdit):
 
 @app.get("/analise/baixar-pdf/{usuario}", tags=["Analise"])
 def baixar_pdf_completo(usuario: str):
-    """Gera e retorna PDF do último protocolo."""
     try:
         user = db.usuarios.find_one({"usuario": usuario})
         if not user or not user.get('historico_dossies'): 
@@ -1223,7 +1225,6 @@ def baixar_pdf_completo(usuario: str):
 
 @app.get("/chat/usuarios", tags=["Chat"])
 def listar_usuarios_chat(usuario_atual: str):
-    """Lista usuários disponíveis para chat (exceto o próprio)."""
     users = list(db.usuarios.find(
         {"usuario": {"$ne": usuario_atual}}, 
         {"usuario": 1, "nome": 1, "_id": 0}
@@ -1232,22 +1233,17 @@ def listar_usuarios_chat(usuario_atual: str):
 
 @app.get("/chat/mensagens", tags=["Chat"])
 def pegar_mensagens(user1: str, user2: str):
-    """Recupera histórico de mensagens entre dois usuários."""
     msgs = list(db.chat.find({
         "$or": [
             {"remetente": user1, "destinatario": user2}, 
             {"remetente": user2, "destinatario": user1}
         ]
     }).sort("timestamp", ASCENDING))
-    
-    # Conversão manual de ID necessária aqui pois não usamos Pydantic response model no list
     for m in msgs: m['_id'] = str(m['_id'])
-    
     return {"sucesso": True, "mensagens": msgs}
 
 @app.post("/chat/enviar", tags=["Chat"])
 def enviar_mensagem(dados: ChatMessageRequest):
-    """Envia uma nova mensagem no chat."""
     db.chat.insert_one({
         "remetente": dados.remetente,
         "destinatario": dados.destinatario,
