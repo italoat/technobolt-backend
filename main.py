@@ -811,78 +811,56 @@ def normalizar_texto(texto: str) -> str:
     if not texto: return ""
     return "".join(c for c in unicodedata.normalize('NFD', str(texto)) if unicodedata.category(c) != 'Mn').lower().strip()
 
-def validar_exercicios_final(treino_data: list) -> list:
-    """
-    Validação final pós-IA.
-    Esta função foi REPLICADA EXATAMENTE da versão 90.1 para garantir que as imagens apareçam.
-    Ela realiza o mapeamento exato, fuzzy e substring, e constrói a URL da imagem corretamente.
-    """
-    exercicios_db = ExerciseRepository.get_db()
-    if not treino_data or not exercicios_db: return treino_data
+def validar_e_corrigir_exercicios(lista_exercicios):
+    if not lista_exercicios or not EXERCISE_DB: return lista_exercicios
     
-    # URL CORRIGIDA (Versão 108.2) - Remove formatação Markdown para funcionar no app
     base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
     
-    # Mapas de busca para performance e mapeamento reverso
-    db_map_norm = {normalizar_texto(k): v for k, v in exercicios_db.items()}
-    db_title_map = {normalizar_texto(k): k for k, v in exercicios_db.items()}
+    db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
+    db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
 
-    for dia in treino_data:
-        if 'exercicios' not in dia: continue
+    for ex in lista_exercicios:
+        nome_ia = ex.get('nome', '')
+        nome_ia_norm = normalizar_texto(nome_ia)
         
-        corrected_exs = []
-        for ex in dia['exercicios']:
-            raw_name = ex.get('nome', 'Exercício')
-            norm_name = normalizar_texto(raw_name)
-            
-            pasta_github = None
-            nome_final = raw_name
-            
-            # 1. Match Exato (Prioridade Máxima)
-            if norm_name in db_map_norm:
-                pasta_github = db_map_norm[norm_name]
-                nome_final = db_title_map[norm_name].title()
+        pasta_github = None
+        nome_final = nome_ia 
+
+        if nome_ia_norm in db_map_norm:
+            pasta_github = db_map_norm[nome_ia_norm]
+            nome_final = db_title_map[nome_ia_norm].title()
+        else:
+            matches = difflib.get_close_matches(nome_ia_norm, db_map_norm.keys(), n=1, cutoff=0.6)
+            if matches:
+                match_key = matches[0]
+                pasta_github = db_map_norm[match_key]
+                nome_final = db_title_map[match_key].title()
             else:
-                # 2. Match por Similaridade (Fuzzy Logic - Difflib)
-                matches = difflib.get_close_matches(norm_name, db_map_norm.keys(), n=1, cutoff=0.6)
-                if matches:
-                    match_key = matches[0]
-                    pasta_github = db_map_norm[match_key]
-                    nome_final = db_title_map[match_key].title()
+                melhor_candidato = None
+                for key in db_map_norm.keys():
+                    if (key in nome_ia_norm and len(key) > 4) or (nome_ia_norm in key and len(nome_ia_norm) > 4): 
+                        melhor_candidato = key
+                        break
+                
+                if melhor_candidato:
+                    pasta_github = db_map_norm[melhor_candidato]
+                    nome_final = db_title_map[melhor_candidato].title()
                 else:
-                    # 3. Match por Substring (Contém)
-                    melhor_candidato = None
-                    for key in db_map_norm.keys():
-                        if (key in norm_name and len(key) > 4) or (norm_name in key and len(norm_name) > 4): 
-                            melhor_candidato = key
-                            break
-                    
-                    if melhor_candidato:
-                        pasta_github = db_map_norm[melhor_candidato]
-                        nome_final = db_title_map[melhor_candidato].title()
-                    else:
-                        # 4. Fallback Seguro (Último recurso para não quebrar a UI)
-                        fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
-                        pasta_github = db_map_norm[fallback_key]
-                        nome_final = f"{raw_name} (Adaptado - Ver {db_title_map[fallback_key].title()})"
+                    fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
+                    pasta_github = db_map_norm[fallback_key]
+                    nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
 
-            # Atualiza objeto com nome padronizado
-            ex['nome'] = str(nome_final)
-            
-            # Constrói a lista de imagens EXATAMENTE como no frontend espera
-            if pasta_github:
-                ex['imagens_demonstracao'] = [
-                    f"{base_url}/{pasta_github}/0.jpg",
-                    f"{base_url}/{pasta_github}/1.jpg"
-                ]
-            else:
-                ex['imagens_demonstracao'] = []
-            
-            corrected_exs.append(ex)
+        ex['nome'] = nome_final
         
-        dia['exercicios'] = corrected_exs
-            
-    return treino_data
+        if pasta_github:
+            ex['imagens_demonstracao'] = [
+                f"{base_url}/{pasta_github}/0.jpg",
+                f"{base_url}/{pasta_github}/1.jpg"
+            ]
+        else:
+            ex['imagens_demonstracao'] = [] 
+
+    return lista_exercicios
 
 def calcular_medalha(username: str) -> str:
     """Calcula medalha do usuário para gamificação."""
