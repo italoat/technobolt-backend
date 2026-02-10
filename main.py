@@ -1,6 +1,6 @@
 """
 TechnoBolt Gym Hub API - Enterprise Edition
-Version: 108.2-Titanium-Fixed-Final
+Version: 108.3-Titanium-Stability-Patch
 Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline & Multi-Level Rotation
 Copyright (c) 2026 TechnoBolt Solutions.
 """
@@ -148,7 +148,7 @@ class Settings:
         
         # Metadados da API
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "108.2-Titanium-Fixed-Final"
+        self.API_VERSION = "108.3-Titanium-Stability-Patch"
         self.ENV = self._get_env("ENV", "production")
         
         # Carregamento dinâmico de chaves de API (Load Balancer)
@@ -166,8 +166,10 @@ class Settings:
         ]
         
         # Formatter (Estruturação): Prioriza velocidade e aderência a JSON
+        # CORREÇÃO SÊNIOR: Gemini 2.0 Flash promovido a primário para evitar erros de sintaxe JSON
         self.STRUCTURING_MODELS = [
-            "models/gemini-flash-latest"      # Formatador Rápido
+            "models/gemini-2.0-flash",        # Mais robusto para JSON complexo
+            "models/gemini-flash-latest"      # Fallback rápido
         ]
         
         logger.info(f"🧠 Motores de Raciocínio Ativos: {self.REASONING_MODELS}")
@@ -708,7 +710,7 @@ class AIOrchestrator:
                     prompt=prompt_p2,
                     image_bytes=None,
                     json_mode=True, # Força modo JSON
-                    temperature=0.1 # Precisão máxima para sintaxe
+                    temperature=0.0 # PRECISÃO MÁXIMA (Zero criatividade) para evitar erros de sintaxe
                 )
                 return JSONRepairKit.parse_robust(json_text)
             except Exception as e:
