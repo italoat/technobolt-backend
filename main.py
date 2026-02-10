@@ -821,7 +821,7 @@ def validar_exercicios_final(treino_data: list) -> list:
     if not treino_data or not exercicios_db: return treino_data
     
     # URL CORRIGIDA (Versão 108.2) - Remove formatação Markdown para funcionar no app
-    base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
+    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
     
     # Mapas de busca para performance e mapeamento reverso
     db_map_norm = {normalizar_texto(k): v for k, v in exercicios_db.items()}
