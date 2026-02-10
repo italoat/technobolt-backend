@@ -1,6 +1,6 @@
 """
 TechnoBolt Gym Hub API - Enterprise Edition
-Version: 108.0-Titanium-Fixed
+Version: 108.1-Titanium-Fixed-Visual
 Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline & Multi-Level Rotation
 Copyright (c) 2026 TechnoBolt Solutions.
 """
@@ -148,7 +148,7 @@ class Settings:
         
         # Metadados da API
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "108.0-Titanium-Fixed"
+        self.API_VERSION = "108.1-Titanium-Fixed-Visual"
         self.ENV = self._get_env("ENV", "production")
         
         # Carregamento dinâmico de chaves de API (Load Balancer)
@@ -803,7 +803,7 @@ class PDFReport(FPDF):
         self.ln(2)
 
 # ==============================================================================
-# SEÇÃO 12: HELPERS DE NEGÓCIO E VALIDAÇÃO PÓS-IA (BLINDAGEM REFORÇADA)
+# SEÇÃO 12: HELPERS DE NEGÓCIO E VALIDAÇÃO PÓS-IA (BLINDAGEM REFORÇADA VISUAL)
 # ==============================================================================
 
 def normalizar_texto(texto: str) -> str:
@@ -814,19 +814,18 @@ def normalizar_texto(texto: str) -> str:
 def validar_exercicios_final(treino_data: list) -> list:
     """
     Validação final pós-IA.
-    Esta função é o 'Shielding' (Blindagem) final.
-    Ela garante que qualquer nome gerado pela IA seja mapeado para uma pasta de imagem real existente no servidor.
-    Se a IA gerar um nome similar, o fuzzy matching corrige.
+    Esta função foi REPLICADA EXATAMENTE da versão 90.1 para garantir que as imagens apareçam.
+    Ela realiza o mapeamento exato, fuzzy e substring, e constrói a URL da imagem corretamente.
     """
     exercicios_db = ExerciseRepository.get_db()
     if not treino_data or not exercicios_db: return treino_data
     
-    # URL base para ativos estáticos
+    # URL base limpa (SEM MARKDOWN)
     base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
     
-    # Mapas de busca O(1) para performance
-    db_map = {normalizar_texto(k): v for k, v in exercicios_db.items()}
-    db_titles = {normalizar_texto(k): k for k, v in exercicios_db.items()}
+    # Mapas de busca para performance e mapeamento reverso
+    db_map_norm = {normalizar_texto(k): v for k, v in exercicios_db.items()}
+    db_title_map = {normalizar_texto(k): k for k, v in exercicios_db.items()}
 
     for dia in treino_data:
         if 'exercicios' not in dia: continue
@@ -836,38 +835,45 @@ def validar_exercicios_final(treino_data: list) -> list:
             raw_name = ex.get('nome', 'Exercício')
             norm_name = normalizar_texto(raw_name)
             
-            path = None
-            final_name = raw_name
+            pasta_github = None
+            nome_final = raw_name
             
             # 1. Match Exato (Prioridade Máxima)
-            if norm_name in db_map:
-                path = db_map[norm_name]
-                final_name = db_titles[norm_name]
+            if norm_name in db_map_norm:
+                pasta_github = db_map_norm[norm_name]
+                nome_final = db_title_map[norm_name].title()
             else:
                 # 2. Match por Similaridade (Fuzzy Logic - Difflib)
-                # Tenta encontrar o nome mais próximo no banco
-                matches = difflib.get_close_matches(norm_name, db_map.keys(), n=1, cutoff=0.6)
+                matches = difflib.get_close_matches(norm_name, db_map_norm.keys(), n=1, cutoff=0.6)
                 if matches:
-                    path = db_map[matches[0]]
-                    final_name = db_titles[matches[0]]
+                    match_key = matches[0]
+                    pasta_github = db_map_norm[match_key]
+                    nome_final = db_title_map[match_key].title()
                 else:
-                    # 3. Match por Substring (Fallback de contensão)
-                    for k in db_map.keys():
-                        if k in norm_name or norm_name in k:
-                            path = db_map[k]
-                            final_name = db_titles[k]
+                    # 3. Match por Substring (Contém)
+                    melhor_candidato = None
+                    for key in db_map_norm.keys():
+                        if (key in norm_name and len(key) > 4) or (norm_name in key and len(norm_name) > 4): 
+                            melhor_candidato = key
                             break
-                    # 4. Fallback Seguro (Último recurso)
-                    if not path and "polichinelo" in db_map:
-                        path = db_map["polichinelo"]
-                        final_name = f"{raw_name} (Adaptado)"
+                    
+                    if melhor_candidato:
+                        pasta_github = db_map_norm[melhor_candidato]
+                        nome_final = db_title_map[melhor_candidato].title()
+                    else:
+                        # 4. Fallback Seguro (Último recurso para não quebrar a UI)
+                        fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
+                        pasta_github = db_map_norm[fallback_key]
+                        nome_final = f"{raw_name} (Adaptado - Ver {db_title_map[fallback_key].title()})"
 
-            # Atualiza objeto com nome padronizado do banco e injeta as URLs das imagens
-            ex['nome'] = str(final_name).title()
-            if path:
+            # Atualiza objeto com nome padronizado
+            ex['nome'] = str(nome_final)
+            
+            # Constrói a lista de imagens EXATAMENTE como no frontend espera
+            if pasta_github:
                 ex['imagens_demonstracao'] = [
-                    f"{base_url}/{path}/0.jpg",
-                    f"{base_url}/{path}/1.jpg"
+                    f"{base_url}/{pasta_github}/0.jpg",
+                    f"{base_url}/{pasta_github}/1.jpg"
                 ]
             else:
                 ex['imagens_demonstracao'] = []
@@ -892,7 +898,7 @@ def calcular_medalha(username: str) -> str:
 app = FastAPI(
     title=settings.API_TITLE,
     version=settings.API_VERSION,
-    description="Backend Enterprise da TechnoBolt. Arquitetura Chain-of-Thought (CoT) com Pipeline Bifásica."
+    description="Backend Enterprise da TechnoBolt. Arquitetura Chain-of-Thought (CoT) com Pipeline Bifásica e Blindagem Visual."
 )
 
 app.add_middleware(
