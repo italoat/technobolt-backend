@@ -62,13 +62,7 @@ class Settings:
 settings = Settings()
 
 # --- MOTORES DE IA (MANTIDOS ESTRITAMENTE IGUAIS) ---
-MOTORES_TECHNOBOLT = [
-    "models/gemini-3-flash-preview", 
-    "models/gemini-2.5-flash", 
-    "models/gemini-2.0-flash", 
-    "models/gemini-flash-latest"
-]
-
+MOTORES_TECHNOBOLT = ["models/gemini-3-flash-preview", "models/gemini-2.5-flash", "models/gemini-2.0-flash", "models/gemini-flash-latest"]
 # --- CAMADA DE DADOS: CONEXÃO MONGODB ---
 class Database:
     """Gerenciador Singleton de conexão com o Banco de Dados."""
