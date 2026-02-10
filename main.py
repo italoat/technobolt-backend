@@ -1,7 +1,7 @@
 """
 TechnoBolt Gym Hub API - Enterprise Edition
-Version: 105.0-Titanium
-Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline
+Version: 107.0-Titanium-FullScope
+Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline & Multi-Level Rotation
 Copyright (c) 2026 TechnoBolt Solutions.
 """
 
@@ -68,7 +68,7 @@ class EnterpriseLogger:
         logger = logging.getLogger("TechnoBoltAPI")
         logger.setLevel(logging.INFO)
         
-        # Remove handlers existentes para evitar duplicação
+        # Remove handlers existentes para evitar duplicação em reloads
         if logger.hasHandlers():
             logger.handlers.clear()
             
@@ -87,7 +87,7 @@ logger = EnterpriseLogger.setup()
 # SEÇÃO 2: INICIALIZAÇÃO DE SUPORTE
 # ==============================================================================
 
-# Suporte nativo para imagens HEIC (iOS)
+# Suporte nativo para imagens HEIC (iOS) para evitar erros de upload de iPhone
 try:
     pillow_heif.register_heif_opener()
     logger.info("✅ Suporte a HEIC/HEIF inicializado com sucesso.")
@@ -114,18 +114,20 @@ class Settings:
         
         # Metadados da API
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "105.0-Titanium"
+        self.API_VERSION = "107.0-Titanium-FullScope"
         self.ENV = self._get_env("ENV", "production")
         
         # Carregamento dinâmico de chaves de API (Load Balancer)
         self.GEMINI_KEYS = self._load_api_keys()
         
-        # Definição de Motores (Imutável conforme solicitação)
+        # Definição de Motores (Estratégia Hierárquica)
+        # Brain (Raciocínio): Prioriza inteligência e contexto
         self.REASONING_MODELS = [
             "models/gemini-3-flash-preview", 
             "models/gemini-2.5-flash", 
             "models/gemini-2.0-flash"
         ]
+        # Formatter (Estruturação): Prioriza velocidade e aderência a JSON
         self.STRUCTURING_MODELS = [
             "models/gemini-flash-latest"
         ]
@@ -138,7 +140,7 @@ class Settings:
 
     def _load_api_keys(self) -> List[str]:
         keys = []
-        # Varre até 20 slots de chaves para garantir redundância
+        # Varre até 20 slots de chaves para garantir redundância e escalabilidade
         for i in range(1, 21):
             key_val = os.environ.get(f"GEMINI_CHAVE_{i}")
             if key_val and len(key_val.strip()) > 10:
@@ -146,7 +148,6 @@ class Settings:
         
         if not keys:
             logger.critical("❌ ERRO CRÍTICO: Nenhuma chave de API (GEMINI_CHAVE_x) encontrada!")
-            # Em produção, poderíamos levantar erro, mas aqui logamos o alerta
         else:
             logger.info(f"🔑 {len(keys)} chaves de API do Gemini carregadas no pool.")
         
@@ -160,7 +161,7 @@ settings = Settings()
 # ==============================================================================
 
 class BaseAPIException(Exception):
-    """Classe base para erros da API."""
+    """Classe base para erros da API com status code associado."""
     def __init__(self, message: str, status_code: int = 500, details: Any = None):
         self.message = message
         self.status_code = status_code
@@ -171,28 +172,20 @@ class DatabaseConnectionError(BaseAPIException):
     def __init__(self, details: str):
         super().__init__("Erro de conexão com o banco de dados.", 503, details)
 
-class AIReasoningError(BaseAPIException):
+class AIProcessingError(BaseAPIException):
     def __init__(self, details: str):
-        super().__init__("A IA falhou na etapa de raciocínio estratégico.", 503, details)
+        super().__init__("Erro no processamento de IA.", 503, details)
 
-class AIStructuringError(BaseAPIException):
-    def __init__(self, details: str):
-        super().__init__("A IA falhou na formatação dos dados.", 503, details)
-
-class UserNotFoundError(BaseAPIException):
-    def __init__(self, user_id: str):
-        super().__init__(f"Usuário '{user_id}' não encontrado.", 404)
-
-class InsufficientCreditsError(BaseAPIException):
+class AIContextLengthError(BaseAPIException):
     def __init__(self):
-        super().__init__("Saldo de créditos insuficiente para esta operação.", 402)
+        super().__init__("Contexto da IA excedido.", 413)
 
 # ==============================================================================
 # SEÇÃO 5: DECORATORS E MIDDLEWARE
 # ==============================================================================
 
 def measure_time(func):
-    """Decorator para medir tempo de execução de funções críticas."""
+    """Decorator para medir tempo de execução de funções assíncronas."""
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
         start = time.perf_counter()
@@ -204,7 +197,7 @@ def measure_time(func):
     return wrapper
 
 def sync_measure_time(func):
-    """Versão síncrona do medidor de tempo."""
+    """Decorator para medir tempo de execução de funções síncronas."""
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         start = time.perf_counter()
@@ -236,7 +229,7 @@ class MongoManager:
         return cls._instance
 
     def _initialize(self):
-        """Inicializa a conexão com tratamento de erros robusto."""
+        """Inicializa a conexão com parâmetros de tuning para produção."""
         try:
             logger.info("🔌 Inicializando driver MongoDB...")
             password = urllib.parse.quote_plus(settings.MONGO_PASS)
@@ -252,33 +245,15 @@ class MongoManager:
                 retryWrites=True
             )
             
-            # Ping para validar
             self.client.admin.command('ping')
             self.db = self.client[settings.DB_NAME]
-            
             logger.info(f"✅ Conectado ao MongoDB: {settings.DB_NAME}")
-            self._create_indexes()
             
         except Exception as e:
             logger.critical(f"❌ Falha fatal na conexão MongoDB: {e}")
-            # Não levantamos erro aqui para permitir retry posterior nas rotas
-
-    def _create_indexes(self):
-        """Cria índices para otimização de performance."""
-        try:
-            if self.db is not None:
-                # Índice único para usuário
-                self.db.usuarios.create_index("usuario", unique=True)
-                # Índice para login rápido
-                self.db.usuarios.create_index([("usuario", ASCENDING), ("senha", ASCENDING)])
-                # Índice para feed
-                self.db.posts.create_index("data", direction=DESCENDING)
-                logger.info("✅ Índices do banco de dados verificados/criados.")
-        except Exception as e:
-            logger.warning(f"⚠️ Erro ao criar índices: {e}")
 
     def get_collection(self, collection_name: str):
-        """Retorna uma coleção, tentando reconectar se necessário."""
+        """Retorna uma coleção, forçando reconexão se necessário."""
         if self.client is None or self.db is None:
             logger.warning("🔄 Tentando reconexão com MongoDB...")
             self._initialize()
@@ -292,7 +267,7 @@ class MongoManager:
 mongo_db = MongoManager()
 
 # ==============================================================================
-# SEÇÃO 7: MODELOS DE DADOS (SCHEMAS ROBUSTOS)
+# SEÇÃO 7: MODELOS DE DADOS (SCHEMAS PYDANTIC)
 # ==============================================================================
 
 class MongoBaseModel(BaseModel):
@@ -306,15 +281,15 @@ class MongoBaseModel(BaseModel):
     )
 
 class UserLogin(BaseModel):
-    usuario: str = Field(..., min_length=3, max_length=50, description="Nome de usuário único")
-    senha: str = Field(..., min_length=3, description="Senha do usuário")
+    usuario: str = Field(..., min_length=3)
+    senha: str = Field(..., min_length=3)
 
 class UserRegister(BaseModel):
-    usuario: str = Field(..., min_length=3, max_length=50)
+    usuario: str = Field(..., min_length=3)
     senha: str = Field(..., min_length=3)
     nome: str = Field(..., min_length=2)
-    peso: float = Field(..., gt=0, lt=500, description="Peso em kg")
-    altura: float = Field(..., gt=0, lt=300, description="Altura em cm")
+    peso: float = Field(..., gt=0, lt=500)
+    altura: float = Field(..., gt=0, lt=300)
     genero: str = Field(..., pattern="^(Masculino|Feminino|Outro)$")
 
 class UserUpdate(BaseModel):
@@ -355,7 +330,7 @@ class AdminUserEdit(BaseModel):
 class ExerciseRepository:
     """
     Gerencia o carregamento e consulta do banco de exercícios local.
-    Implementa Singleton para manter cache em memória.
+    Implementa Singleton para manter cache em memória e evitar I/O repetitivo.
     """
     _db: Dict[str, str] = {}
     _keys_string: str = ""
@@ -365,14 +340,14 @@ class ExerciseRepository:
         try:
             path = "exercises.json"
             if not os.path.exists(path):
-                logger.warning("⚠️ Arquivo exercises.json não encontrado no diretório raiz.")
+                logger.warning("⚠️ Arquivo exercises.json não encontrado. Validação de exercícios será ignorada.")
                 return
 
             with open(path, "r", encoding="utf-8") as f:
                 cls._db = json.load(f)
                 
             # Prepara string para prompt da IA
-            # Limitamos a 600 exercícios para não estourar contexto, priorizando os mais comuns
+            # Limitamos a 600 exercícios para não estourar contexto
             all_keys = list(cls._db.keys())
             cls._keys_string = ", ".join(all_keys[:600])
             
@@ -401,7 +376,7 @@ ExerciseRepository.load()
 class KeyRotationManager:
     """
     Gerencia o pool de chaves de API, implementando lógica de Round-Robin
-    e Cooldown temporário para chaves que atingem o Rate Limit.
+    e Cooldown temporário para chaves que atingem o Rate Limit (429).
     """
     def __init__(self, keys: List[str]):
         self.keys = keys
@@ -416,12 +391,12 @@ class KeyRotationManager:
         
         available = [k for k in self.keys if k not in self.cooldowns]
         
-        # Se não houver chaves, tenta usar a que libera mais cedo
+        # Se não houver chaves, tenta usar todas (desespero)
         if not available and self.keys:
-            logger.warning("⚠️ Todas as chaves em cooldown. Forçando uso da mais antiga.")
-            return self.keys # Retorna todas para tentar a sorte
+            logger.warning("⚠️ Todas as chaves em cooldown. Forçando uso do pool completo.")
+            return self.keys
             
-        # Embaralha para balanceamento de carga
+        # Embaralha para balanceamento de carga estatístico
         random.shuffle(available)
         return available
 
@@ -439,31 +414,29 @@ key_manager = KeyRotationManager(settings.GEMINI_KEYS)
 class JSONRepairKit:
     """
     Ferramentas avançadas para reparo de strings JSON malformadas.
-    Essencial para garantir que a saída da IA seja utilizável.
+    Resolve problemas de sintaxe comuns em LLMs.
     """
     @staticmethod
     def extract_json_block(text: str) -> str:
         """Tenta encontrar o bloco JSON principal usando Regex."""
-        # Procura pelo padrão { ... } abrangendo multiplas linhas
         match = re.search(r'(\{.*\})', text, re.DOTALL)
         if match:
             return match.group(1)
         return text
 
     @staticmethod
-    def aggressive_repair(text: str) -> str:
-        """Aplica correções agressivas de sintaxe."""
+    def fix_syntax(text: str) -> str:
+        """Corrige erros sintáticos comuns."""
         text = text.strip()
         
-        # Remove blocos de código Markdown
-        text = re.sub(r'^```json\s*', '', text)
-        text = re.sub(r'^```\s*', '', text)
-        text = re.sub(r'\s*```$', '', text)
-        
-        # Remove comentários JS (// e /* */)
+        # Remove Markdown
+        if "```" in text:
+            text = re.sub(r'```json|```', '', text).strip()
+            
+        # Remove comentários estilo C/JS
         text = re.sub(r'//.*?\n|/\*.*?\*/', '', text, flags=re.S)
         
-        # Remove vírgulas trailing (Ex: {"a": 1,}) - Erro muito comum
+        # Remove vírgulas trailing (Ex: {"a": 1,})
         text = re.sub(r',(\s*[}\]])', r'\1', text)
         
         # Balanceamento de chaves (JSON Truncado)
@@ -480,38 +453,41 @@ class JSONRepairKit:
         return text
 
     @classmethod
-    def parse(cls, text: str) -> Dict:
+    def parse_robust(cls, text_ia: str) -> Dict:
         """Pipeline de tentativa de parseamento."""
-        # 1. Tentativa Limpa
+        # 1. Tentativa Direta
         try:
-            return json.loads(text)
+            return json.loads(text_ia)
         except: pass
         
         # 2. Extração de Bloco
-        extracted = cls.extract_json_block(text)
+        extracted = cls.extract_json_block(text_ia)
         try:
             return json.loads(extracted)
         except: pass
         
         # 3. Reparo Agressivo
-        repaired = cls.aggressive_repair(extracted)
+        fixed = cls.fix_syntax(extracted)
         try:
-            return json.loads(repaired)
+            return json.loads(fixed)
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON Irreparável. Erro: {e}")
-            logger.debug(f"Snippet: {text[:200]}...")
-            raise AIStructuringError("Falha na estruturação do JSON pela IA.")
+            logger.debug(f"Snippet: {text_ia[:200]}...")
+            raise AIProcessingError("Falha na estruturação do JSON pela IA.")
 
 class AIOrchestrator:
     """
-    Orquestrador principal da IA. Implementa a arquitetura Chain of Thought.
+    Orquestrador principal da IA. Implementa a arquitetura Chain of Thought
+    com rodízio de chaves aninhado (Nested Loop).
     """
     
     @staticmethod
     def _call_gemini_with_retry(model_name: str, prompt: str, image_bytes: Optional[bytes] = None, 
                               json_mode: bool = False, temperature: float = 0.7) -> str:
         """
-        Executa uma chamada à API tentando rodízio de chaves.
+        NÚCLEO DO RODÍZIO:
+        Tenta TODAS as chaves disponíveis para o modelo especificado.
+        Só levanta erro se todas as chaves falharem.
         """
         keys = key_manager.get_available_keys()
         if not keys:
@@ -519,7 +495,7 @@ class AIOrchestrator:
             
         last_error = None
         
-        # Itera sobre as chaves disponíveis para este modelo
+        # Itera sobre todas as chaves disponíveis
         for api_key in keys:
             try:
                 genai.configure(api_key=api_key)
@@ -535,10 +511,11 @@ class AIOrchestrator:
                 if image_bytes:
                     inputs.append({"mime_type": "image/jpeg", "data": image_bytes})
                 
-                # Chamada Síncrona (FastAPI roda em thread pool)
+                # Chamada Síncrona
                 response = model.generate_content(inputs, generation_config=config)
                 
                 if response and response.text:
+                    logger.info(f"   ✅ Sucesso: {model_name} (Key ...{api_key[-4:]})")
                     return response.text
                 
             except Exception as e:
@@ -547,12 +524,12 @@ class AIOrchestrator:
                 if "429" in err_str or "Resource exhausted" in err_str:
                     key_manager.report_rate_limit(api_key)
                 
-                logger.warning(f"⚠️ Erro com modelo {model_name} (Key ...{api_key[-4:]}): {err_str[:100]}")
+                logger.warning(f"   ⚠️ Falha: {model_name} (Key ...{api_key[-4:]}): {err_str[:80]}")
                 last_error = e
                 continue # Tenta próxima chave
                 
         # Se saiu do loop, falhou com todas as chaves para este modelo
-        raise last_error if last_error else Exception("Falha desconhecida na IA")
+        raise last_error if last_error else Exception(f"Falha total no modelo {model_name}")
 
     @staticmethod
     def execute_chain_of_thought(context_prompt: str, image_bytes: Optional[bytes]) -> Dict:
@@ -566,23 +543,24 @@ class AIOrchestrator:
         strategy_text = None
         
         # Tenta cada modelo de raciocínio na ordem de preferência
+        # Cada modelo tentará todas as chaves disponíveis antes de passar para o próximo
         for model in settings.REASONING_MODELS:
             try:
-                logger.info(f"🧠 [Fase 1] Raciocínio com {model}...")
+                logger.info(f"🧠 [Fase 1] Iniciando Raciocínio com {model}...")
                 
-                prompt_p1 = context_prompt + "\n\nINSTRUÇÃO CRÍTICA: Gere uma estratégia textual DETALHADA. Não use JSON ainda. Foque na qualidade técnica, bioquímica e biomecânica."
+                prompt_p1 = context_prompt + "\n\nINSTRUÇÃO CRÍTICA: Gere uma estratégia textual DETALHADA. Não use JSON ainda. Foque na qualidade técnica, bioquímica e biomecânica. Seja detalhista."
                 
                 strategy_text = AIOrchestrator._call_gemini_with_retry(
                     model_name=model,
                     prompt=prompt_p1,
                     image_bytes=image_bytes,
                     json_mode=False,
-                    temperature=0.7 # Criatividade alta
+                    temperature=0.7 # Criatividade alta para estratégia
                 )
                 if strategy_text:
                     break # Sucesso na fase 1
             except Exception as e:
-                logger.warning(f"⚠️ Modelo de raciocínio {model} falhou. Tentando próximo...")
+                logger.warning(f"⚠️ Modelo {model} esgotado. Tentando próximo da lista...")
                 continue
         
         if not strategy_text:
@@ -642,7 +620,7 @@ class AIOrchestrator:
         }}
         """
         
-        # Tenta modelos de formatação
+        # Tenta modelos de formatação (geralmente o flash)
         for model in settings.STRUCTURING_MODELS:
             try:
                 logger.info(f"⚡ [Fase 2] Estruturando com {model}...")
@@ -650,35 +628,37 @@ class AIOrchestrator:
                     model_name=model,
                     prompt=prompt_p2,
                     image_bytes=None,
-                    json_mode=True,
+                    json_mode=True, # Força modo JSON
                     temperature=0.1 # Precisão máxima
                 )
-                return JSONRepairKit.parse(json_text)
+                return JSONRepairKit.parse_robust(json_text)
             except Exception as e:
                 logger.warning(f"⚠️ Erro de formatação com {model}: {e}")
                 continue
                 
-        # Se a formatação falhar, tenta parsear o texto original da fase 1 se ele parecer JSON
+        # Se a formatação via IA falhar, tenta parsear o texto original da fase 1 se ele parecer JSON
         try:
-            return JSONRepairKit.parse(strategy_text)
+            return JSONRepairKit.parse_robust(strategy_text)
         except:
-            raise AIStructuringError("Não foi possível gerar um JSON válido.")
+            raise AIStructuringError("Não foi possível gerar um JSON válido após todas as tentativas.")
 
     @staticmethod
     def simple_generation(prompt: str, image_bytes: Optional[bytes] = None) -> str:
-        """Geração simples para tarefas menores."""
+        """Geração rápida para tarefas simples (ex: comentários)."""
         try:
-            # Usa o modelo mais rápido
-            model = settings.STRUCTURING_MODELS[0]
-            return AIOrchestrator._call_gemini_with_retry(model, prompt, image_bytes)
+            # Usa o modelo mais rápido da lista de estruturação
+            return AIOrchestrator._call_gemini_with_retry(
+                settings.STRUCTURING_MODELS[0], 
+                prompt, 
+                image_bytes, 
+                json_mode=False
+            )
         except:
-            return "Análise indisponível no momento."
+            return "Estou analisando seu treino... continue focado!"
 
-# ==============================================================================
-# SEÇÃO 11: PROCESSAMENTO DE IMAGEM & PDF
-# ==============================================================================
-
-class ImageProcessor:
+class ImageService:
+    """Utilitários para processamento e otimização de imagens."""
+    
     @staticmethod
     def optimize(file_bytes: bytes, quality: int = 75, max_size: tuple = (800, 800)) -> bytes:
         try:
@@ -699,6 +679,7 @@ class ImageProcessor:
             return file_bytes
 
 class PDFReport(FPDF):
+    """Gerador de relatórios PDF customizado."""
     def __init__(self):
         super().__init__()
         self.set_auto_page_break(auto=True, margin=15)
@@ -709,7 +690,7 @@ class PDFReport(FPDF):
     def sanitize(self, txt: Any) -> str:
         if not txt: return ""
         s = str(txt).replace("’", "'").replace("–", "-")
-        # Garante compatibilidade Latin-1
+        # Garante compatibilidade Latin-1 para FPDF
         return s.encode('latin-1', 'replace').decode('latin-1')
 
     def header(self):
@@ -800,7 +781,10 @@ def validar_exercicios_final(treino_data: list) -> list:
             # Atualiza objeto
             ex['nome'] = str(final_name).title()
             if path:
-                ex['imagens_demonstracao'] = [f"{base_url}/{path}/0.jpg", f"{base_url}/{path}/1.jpg"]
+                ex['imagens_demonstracao'] = [
+                    f"{base_url}/{path}/0.jpg",
+                    f"{base_url}/{path}/1.jpg"
+                ]
             else:
                 ex['imagens_demonstracao'] = []
             
@@ -840,14 +824,14 @@ app.add_middleware(
 @app.post("/auth/login", tags=["Auth"])
 @sync_measure_time
 def login(dados: UserLogin):
-    collection = mongo_db.get_collection("usuarios")
-    user = collection.find_one({"usuario": dados.usuario, "senha": dados.senha})
+    col = mongo_db.get_collection("usuarios")
+    user = col.find_one({"usuario": dados.usuario, "senha": dados.senha})
     
     if not user:
         raise HTTPException(401, "Credenciais inválidas")
     
     if user.get("status") != "ativo" and not user.get("is_admin"):
-        raise HTTPException(403, "Conta pendente.")
+        raise HTTPException(403, "Conta pendente de aprovação.")
     
     return {
         "sucesso": True,
@@ -889,9 +873,9 @@ def registrar(dados: UserRegister):
 @app.post("/perfil/atualizar", tags=["Perfil"])
 def atualizar_perfil(dados: UserUpdate):
     col = mongo_db.get_collection("usuarios")
-    update_data = {k: v for k, v in dados.model_dump(exclude={'usuario'}).items() if v is not None}
+    data = {k: v for k, v in dados.model_dump(exclude={'usuario'}).items() if v is not None}
     
-    res = col.update_one({"usuario": dados.usuario}, {"$set": update_data})
+    res = col.update_one({"usuario": dados.usuario}, {"$set": data})
     if res.matched_count == 0:
         raise HTTPException(404, "Usuário não encontrado")
     return {"sucesso": True}
@@ -931,10 +915,10 @@ async def executar_analise(
 
     # 3. Imagem
     raw_img = await foto.read()
-    img_opt = ImageProcessor.optimize(raw_img)
+    img_opt = ImageService.optimize(raw_img)
     
-    # 4. Prompt Engineering (Fase 1)
-    # Aqui focamos em extrair o máximo de conhecimento técnico
+    # 4. Prompt Engineering (Fase 1 - Raciocínio)
+    # Focamos em pedir raciocínio profundo
     prompt_brain = f"""
     ACT AS AN ELITE SPORTS SCIENTIST. CREATE THE ULTIMATE PROTOCOL.
     
@@ -957,7 +941,7 @@ async def executar_analise(
         result_json = AIOrchestrator.execute_chain_of_thought(prompt_brain, img_opt)
     except Exception as e:
         logger.error(f"CoT Failure: {e}")
-        raise HTTPException(503, "IA indisponível. Tente novamente.")
+        raise HTTPException(503, "IA indisponível no momento. Tente novamente.")
 
     # 6. Validação de Exercícios
     if 'treino' in result_json:
@@ -1024,6 +1008,36 @@ async def regenerar_secao(dados: dict = Body(...)):
     except:
         return {"sucesso": False}
 
+# --- ROTA LEGADA PARA HISTÓRICO (CORREÇÃO DE ERRO NO FLUTTER) ---
+
+@app.get("/historico/{usuario}", tags=["Perfil"])
+def buscar_historico(usuario: str):
+    """
+    Retorna o histórico completo e perfil atualizado.
+    Rota crucial para evitar 'Exception not Found' no carregamento do app.
+    """
+    col = mongo_db.get_collection("usuarios")
+    user = col.find_one({"usuario": usuario})
+    if not user: 
+        # Retorna estrutura vazia válida em vez de 404 para não crashar o app
+        return {"sucesso": True, "historico": []}
+    
+    return {
+        "sucesso": True, 
+        "historico": jsonable_encoder(user.get('historico_dossies', [])), 
+        "creditos": user.get('avaliacoes_restantes', 0), 
+        "perfil": {
+            "peso": user.get('peso'),
+            "altura": user.get('altura'),
+            "genero": user.get('genero', 'Masculino'),
+            "restricoes_alim": user.get('restricoes_alim', ''),
+            "restricoes_fis": user.get('restricoes_fis', ''),
+            "medicamentos": user.get('medicamentos', ''),
+            "info_add": user.get('info_add', ''),
+            "creditos": user.get('avaliacoes_restantes', 0)
+        }
+    }
+
 # --- ROTAS SOCIAIS ---
 
 @app.get("/social/feed", tags=["Social"])
@@ -1042,7 +1056,7 @@ async def postar(
     imagem: UploadFile = File(...)
 ):
     img_bytes = await imagem.read()
-    img_opt = ImageProcessor.optimize(img_bytes, size=(600, 600))
+    img_opt = ImageService.optimize(img_bytes, size=(600, 600))
     
     # Comentário rápido
     cmt = AIOrchestrator.simple_generation(f"Comentário curto e motivador (gym bro) para: {legenda}", img_opt)
@@ -1055,6 +1069,89 @@ async def postar(
         "comentarios": [{"autor": "TechnoBolt AI", "texto": cmt}] if cmt else []
     })
     return {"sucesso": True}
+
+@app.post("/social/post/deletar", tags=["Social"])
+def deletar_post_social(dados: SocialPostRequest):
+    col = mongo_db.get_collection("posts")
+    res = col.delete_one({"_id": ObjectId(dados.post_id), "autor": dados.usuario})
+    return {"sucesso": res.deleted_count > 0}
+
+@app.post("/social/curtir", tags=["Social"])
+def curtir_post(dados: SocialPostRequest):
+    col = mongo_db.get_collection("posts")
+    oid = ObjectId(dados.post_id)
+    post = col.find_one({"_id": oid})
+    if not post: return {"sucesso": False}
+    
+    if dados.usuario in post.get("likes", []):
+        col.update_one({"_id": oid}, {"$pull": {"likes": dados.usuario}})
+    else:
+        col.update_one({"_id": oid}, {"$addToSet": {"likes": dados.usuario}})
+    return {"sucesso": True}
+
+@app.post("/social/comentar", tags=["Social"])
+def postar_comentario(dados: SocialCommentRequest):
+    col = mongo_db.get_collection("posts")
+    cmt = {
+        "autor": dados.usuario,
+        "texto": dados.texto,
+        "data": datetime.now().isoformat()
+    }
+    col.update_one({"_id": ObjectId(dados.post_id)}, {"$push": {"comentarios": cmt}})
+    return {"sucesso": True}
+
+# --- GAMIFICAÇÃO & VISION AI ---
+
+@app.get("/social/ranking", tags=["Social"])
+def get_ranking():
+    col = mongo_db.get_collection("usuarios")
+    users = list(col.find({"is_admin": False}, {"nome": 1, "usuario": 1, "pontos": 1, "foto_perfil": 1, "_id": 0}).sort("pontos", DESCENDING).limit(50))
+    return {"sucesso": True, "ranking": users}
+
+@app.get("/social/checkins", tags=["Social"])
+def get_checkins(usuario: str):
+    col = mongo_db.get_collection("checkins")
+    now = datetime.now()
+    start = datetime(now.year, now.month, 1).isoformat()
+    checkins = list(col.find({"usuario": usuario, "data": {"$gte": start}}))
+    
+    formatted = {}
+    for c in checkins:
+        try:
+            d = datetime.fromisoformat(c['data']).day
+            formatted[d] = c['tipo']
+        except: pass
+    return {"sucesso": True, "checkins": formatted}
+
+@app.post("/social/validar-conquista", tags=["Social"])
+async def validar_conquista(
+    usuario: str = Form(...),
+    tipo: str = Form(...), 
+    foto: UploadFile = File(...)
+):
+    """Valida checkin via IA de Visão."""
+    col = mongo_db.get_collection("checkins")
+    now = datetime.now()
+    today_start = datetime(now.year, now.month, now.day).isoformat()
+    
+    if col.find_one({"usuario": usuario, "data": {"$gte": today_start}}):
+        return {"sucesso": False, "mensagem": "Checkin já realizado hoje."}
+
+    content = await foto.read()
+    img_opt = ImageService.optimize(content)
+    
+    # Usa modelo rápido para visão
+    resp = AIOrchestrator.simple_generation(f"Valide se esta imagem comprova um treino de {tipo}. Responda APROVADO ou REPROVADO.", img_opt)
+    
+    if resp and "APROVADO" in resp.upper():
+        pts = 50
+        col.insert_one({"usuario": usuario, "tipo": tipo, "data": now.isoformat(), "pontos": pts})
+        mongo_db.get_collection("usuarios").update_one({"usuario": usuario}, {"$inc": {"pontos": pts}})
+        return {"sucesso": True, "aprovado": True, "pontos": pts}
+    else:
+        return {"sucesso": True, "aprovado": False, "mensagem": "Não foi possível validar o treino."}
+
+# --- CHAT & ADMIN ---
 
 @app.get("/chat/mensagens", tags=["Chat"])
 def get_msgs(user1: str, user2: str):
@@ -1070,14 +1167,42 @@ def send_msg(dados: ChatMessageRequest):
     col.insert_one(dados.model_dump())
     return {"sucesso": True}
 
+@app.get("/chat/usuarios", tags=["Chat"])
+def list_chat_users(usuario_atual: str):
+    col = mongo_db.get_collection("usuarios")
+    users = list(col.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
+    return {"sucesso": True, "usuarios": users}
+
+@app.get("/admin/listar", tags=["Admin"])
+def admin_list():
+    users = list(mongo_db.get_collection("usuarios").find())
+    for u in users: u['_id'] = str(u['_id'])
+    return {"sucesso": True, "usuarios": users}
+
+@app.post("/admin/editar", tags=["Admin"])
+def admin_edit(dados: AdminUserEdit):
+    upd = {}
+    if dados.status: upd["status"] = dados.status
+    if dados.creditos is not None: upd["avaliacoes_restantes"] = dados.creditos
+    mongo_db.get_collection("usuarios").update_one({"usuario": dados.target_user}, {"$set": upd})
+    return {"sucesso": True}
+
+@app.get("/setup/criar-admin", tags=["Admin"])
+def create_admin():
+    col = mongo_db.get_collection("usuarios")
+    if col.find_one({"usuario": "admin"}): return {"sucesso": False, "mensagem": "Admin existe."}
+    col.insert_one({"usuario": "admin", "senha": "123", "nome": "Super Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999})
+    return {"sucesso": True}
+
+# --- PDF ---
+
 @app.get("/analise/baixar-pdf/{usuario}", tags=["Export"])
 def download_pdf(usuario: str):
-    col = mongo_db.get_collection("usuarios")
-    user = col.find_one({"usuario": usuario})
-    
-    if not user or not user.get('historico_dossies'): raise HTTPException(404)
-    
     try:
+        col = mongo_db.get_collection("usuarios")
+        user = col.find_one({"usuario": usuario})
+        if not user or not user.get('historico_dossies'): raise HTTPException(404)
+        
         dossie = user['historico_dossies'][-1]
         data = dossie['conteudo_bruto']['json_full']
         
@@ -1098,7 +1223,7 @@ def download_pdf(usuario: str):
         
         if 'treino' in data:
             pdf.add_page()
-            pdf.chapter_title("TREINO 7 DIAS (HIGH VOLUME)")
+            pdf.chapter_title("TREINO HARDCORE 7 DIAS")
             for t in data['treino']:
                 pdf.card(f"{t.get('dia')} - {t.get('foco')}", t.get('justificativa', ''))
                 for ex in t.get('exercicios', []):
