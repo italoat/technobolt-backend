@@ -60,11 +60,11 @@ def get_database():
 db = get_database()
 
 # --- [SENIOR FIX] SANITIZAÇÃO GLOBAL DE TIPOS ---
-# Garante que o Flutter nunca receba um Double/Int onde espera String
+# Garante que o Flutter nunca receba um Double/Int/ObjectId onde espera String
 def preparar_resposta_frontend(data):
     """
     Percorre qualquer estrutura (Dict, List, Valor) e converte 
-    forçadamente int/float para string, prevenindo crash no Flutter.
+    forçadamente int/float/ObjectId para string, prevenindo crash no Flutter.
     """
     if isinstance(data, dict):
         return {k: preparar_resposta_frontend(v) for k, v in data.items()}
@@ -72,6 +72,8 @@ def preparar_resposta_frontend(data):
         return [preparar_resposta_frontend(v) for v in data]
     elif isinstance(data, (int, float)):
         return str(data) 
+    elif isinstance(data, ObjectId):
+        return str(data)
     elif data is None:
         return "" 
     else:
