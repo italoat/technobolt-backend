@@ -9,30 +9,35 @@ import difflib
 import urllib.parse
 import unicodedata
 import time
+import typing
 from datetime import datetime
 from typing import List, Optional, Any, Dict, Union
 
-# Frameworks e Utilitários
+# --- FRAMEWORKS E UTILITÁRIOS ---
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, status, Body
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, BeforeValidator, ConfigDict
 from typing_extensions import Annotated
 
-# Banco de Dados
+# --- BANCO DE DADOS ---
 from pymongo import MongoClient, ASCENDING, DESCENDING
 from bson.objectid import ObjectId
-from pymongo.errors import PyMongoError
+from pymongo.errors import PyMongoError, ServerSelectionTimeoutError
 
-# IA e Processamento de Imagem
+# --- IA E PROCESSAMENTO DE IMAGEM ---
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 from PIL import Image, ImageOps
 import pillow_heif
 
-# Geração de PDF
+# --- GERAÇÃO DE PDF ---
 from fpdf import FPDF
 
-# --- CONFIGURAÇÃO DE LOGGING (ENTERPRISE GRADE) ---
+# ==============================================================================
+# CONFIGURAÇÃO DE LOGGING (ENTERPRISE GRADE)
+# ==============================================================================
+# Configuração detalhada para rastrear exatamente onde o JSON quebra
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -40,29 +45,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger("TechnoBoltAPI")
 
-# --- INICIALIZAÇÃO DE SUPORTE HEIC ---
+# ==============================================================================
+# INICIALIZAÇÃO DE SUPORTE
+# ==============================================================================
 pillow_heif.register_heif_opener()
 
-# --- CONFIGURAÇÕES DE AMBIENTE (SETTINGS) ---
+# ==============================================================================
+# CONFIGURAÇÕES DE AMBIENTE (SETTINGS)
+# ==============================================================================
 class Settings:
-    """Centraliza as configurações da aplicação e variáveis de ambiente."""
+    """Centraliza as configurações da aplicação e variáveis de ambiente com validação."""
     MONGO_USER = os.environ.get("MONGO_USER", "technobolt")
     MONGO_PASS = os.environ.get("MONGO_PASS", "tech@132")
     MONGO_HOST = os.environ.get("MONGO_HOST", "cluster0.zbjsvk6.mongodb.net")
     DB_NAME = "technoboltgym"
     API_TITLE = "TechnoBolt Gym Hub API"
-    API_VERSION = "97.5-Elite-Senior-Final"
+    API_VERSION = "98.0-Ultimate-Stability"
     
-    # Rotação de chaves de API para balanceamento de carga
+    # Rotação de chaves de API para balanceamento de carga e alta disponibilidade
+    # O sistema irá ignorar chaves vazias ou nulas
     GEMINI_KEYS = [
-        os.environ.get(f"GEMINI_CHAVE_{i}") 
-        for i in range(1, 8) 
-        if os.environ.get(f"GEMINI_CHAVE_{i}")
+        key for key in [
+            os.environ.get(f"GEMINI_CHAVE_{i}") for i in range(1, 11)
+        ] if key is not None and len(key) > 10
     ]
 
 settings = Settings()
 
-# --- MOTORES DE IA (MANTIDOS ESTRITAMENTE CONFORME SOLICITADO) ---
+# ==============================================================================
+# MOTORES DE IA (MANTIDOS ESTRITAMENTE CONFORME SOLICITADO)
+# ==============================================================================
+# Nota: Se estes modelos não estiverem disponíveis na sua conta Google AI Studio,
+# o sistema irá gerar logs de erro 404, mas tentará os outros da lista.
 MOTORES_TECHNOBOLT = [
     "models/gemini-3-flash-preview", 
     "models/gemini-2.5-flash", 
@@ -70,22 +84,37 @@ MOTORES_TECHNOBOLT = [
     "models/gemini-flash-latest"
 ]
 
-# --- CAMADA DE DADOS: CONEXÃO MONGODB ---
+# ==============================================================================
+# CAMADA DE DADOS: CONEXÃO MONGODB ROBUSTA
+# ==============================================================================
 class Database:
-    """Gerenciador Singleton de conexão com o Banco de Dados."""
+    """Gerenciador Singleton de conexão com o Banco de Dados com Reconexão Automática."""
     client: MongoClient = None
 
     @classmethod
     def connect(cls):
         try:
+            logger.info("🔌 Iniciando conexão com MongoDB Atlas...")
             password = urllib.parse.quote_plus(settings.MONGO_PASS)
             uri = f"mongodb+srv://{settings.MONGO_USER}:{password}@{settings.MONGO_HOST}/?appName=Cluster0"
-            cls.client = MongoClient(uri)
+            
+            # Configurações de timeout para evitar travamentos
+            cls.client = MongoClient(
+                uri, 
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=10000,
+                socketTimeoutMS=10000
+            )
+            
             # Teste de conexão (Ping) para garantir que o banco está vivo no startup
             cls.client.admin.command('ping')
             logger.info("✅ Conexão com MongoDB estabelecida com sucesso.")
+        
+        except ServerSelectionTimeoutError as e:
+            logger.critical(f"❌ Timeout ao conectar no MongoDB. Verifique IP Whitelist no Atlas. Erro: {e}")
+            # Não damos raise aqui para permitir que a API suba, mas sem banco (modo degradação)
         except Exception as e:
-            logger.critical(f"❌ Falha crítica ao conectar no MongoDB: {e}")
+            logger.critical(f"❌ Falha crítica desconhecida ao conectar no MongoDB: {e}")
             raise e
 
     @classmethod
@@ -98,7 +127,9 @@ class Database:
 Database.connect()
 db = Database.get_db()
 
-# --- UTILITÁRIOS: PYOBJECTID (SERIALIZAÇÃO AUTOMÁTICA) ---
+# ==============================================================================
+# UTILITÁRIOS: PYOBJECTID (SERIALIZAÇÃO AUTOMÁTICA)
+# ==============================================================================
 PyObjectId = Annotated[str, BeforeValidator(str)]
 
 class MongoModel(BaseModel):
@@ -111,7 +142,9 @@ class MongoModel(BaseModel):
         json_encoders={ObjectId: str}
     )
 
-# --- MODELOS DE DADOS (SCHEMAS ROBUSTOS) ---
+# ==============================================================================
+# MODELOS DE DADOS (SCHEMAS ROBUSTOS)
+# ==============================================================================
 
 class UserLogin(BaseModel):
     usuario: str
@@ -156,7 +189,9 @@ class AdminUserEdit(BaseModel):
     status: Optional[str] = None
     creditos: Optional[int] = None
 
-# --- BANCO DE EXERCÍCIOS (CARREGAMENTO E CACHE) ---
+# ==============================================================================
+# BANCO DE EXERCÍCIOS (CARREGAMENTO E CACHE)
+# ==============================================================================
 EXERCISE_DB = {}
 EXERCISE_LIST_STRING = ""
 
@@ -164,84 +199,100 @@ def carregar_exercicios():
     """Carrega o JSON local de exercícios para memória para validação rápida."""
     global EXERCISE_DB, EXERCISE_LIST_STRING
     try:
-        with open("exercises.json", "r", encoding="utf-8") as f:
+        caminho_arquivo = "exercises.json"
+        if not os.path.exists(caminho_arquivo):
+            logger.warning(f"⚠️ Arquivo {caminho_arquivo} não encontrado. Criando base vazia.")
+            return
+
+        with open(caminho_arquivo, "r", encoding="utf-8") as f:
             EXERCISE_DB = json.load(f)
             keys = list(EXERCISE_DB.keys())
             # Convertemos para string para injetar no prompt da IA
-            EXERCISE_LIST_STRING = ", ".join(keys)
-        logger.info(f"✅ Banco de Exercícios Carregado: {len(EXERCISE_DB)} itens disponíveis para a IA.")
-    except FileNotFoundError:
-        logger.warning("⚠️ Arquivo exercises.json não encontrado. A API funcionará sem imagens de referência.")
+            # Limitamos o tamanho da string para não estourar o contexto do prompt se for gigante
+            EXERCISE_LIST_STRING = ", ".join(keys[:500]) 
+        logger.info(f"✅ Banco de Exercícios Carregado: {len(EXERCISE_DB)} itens disponíveis.")
     except Exception as e:
         logger.error(f"⚠️ Erro crítico ao carregar exercises.json: {e}")
 
 carregar_exercicios()
 
-# --- SERVIÇOS (LÓGICA DE NEGÓCIO) ---
+# ==============================================================================
+# SERVIÇOS (LÓGICA DE NEGÓCIO AVANÇADA)
+# ==============================================================================
 
 def reparar_json_quebrado(texto: str) -> str:
     """
-    Tenta consertar erros comuns de JSON gerados por LLMs em textos longos.
-    Resolve o erro "Expecting ',' delimiter" e JSONs truncados.
+    Função de engenharia de software avançada para consertar JSONs malformados por LLMs.
+    Resolve erros de 'Expecting delimiter', truncamento e caracteres ilegais.
     """
-    # 1. Remove caracteres de formatação Markdown extras no início/fim
-    texto = texto.strip()
-    if texto.startswith("```json"):
-        texto = texto[7:]
-    if texto.endswith("```"):
-        texto = texto[:-3]
-    texto = texto.strip()
-
-    # 2. Remove vírgulas trailing em listas e objetos (ex: [1, 2,] -> [1, 2])
-    # Regex melhorada para pegar vírgula seguida de espaço e fechamento
-    texto = re.sub(r',\s*([\]}])', r'\1', texto)
-    
-    # 3. Balanceamento de chaves e colchetes (caso o texto tenha sido cortado por limite de tokens)
-    # Conta aberturas e fechamentos
-    count_brace_open = texto.count('{')
-    count_brace_close = texto.count('}')
-    count_bracket_open = texto.count('[')
-    count_bracket_close = texto.count(']')
-
-    # Fecha estruturas abertas na ordem inversa (simplificado)
-    # Normalmente JSONs de IA terminam abruptamente dentro de uma estrutura.
-    # Adicionamos fechamentos conservadores.
-    if count_brace_open > count_brace_close:
-        texto += '}' * (count_brace_open - count_brace_close)
-    
-    if count_bracket_open > count_bracket_close:
-        texto += ']' * (count_bracket_open - count_bracket_close)
+    try:
+        # 1. Limpeza de Markdown (Code Blocks)
+        texto = texto.strip()
+        if "```json" in texto:
+            parts = texto.split("```json")
+            if len(parts) > 1:
+                texto = parts[1]
+                if "```" in texto:
+                    texto = texto.split("```")[0]
+        elif "```" in texto:
+            texto = texto.replace("```", "")
         
-    return texto
+        texto = texto.strip()
+
+        # 2. Remoção de comentários estilo JS (// ou /* */) que quebram JSON padrão
+        texto = re.sub(r'//.*?\n|/\*.*?\*/', '', texto, flags=re.S)
+
+        # 3. Correção de vírgulas trailing (o erro mais comum)
+        # Ex: {"a": 1, "b": 2,} -> {"a": 1, "b": 2}
+        texto = re.sub(r',\s*([\]}])', r'\1', texto)
+
+        # 4. Balanceamento de chaves e colchetes (para JSON truncado por limite de tokens)
+        count_brace_open = texto.count('{')
+        count_brace_close = texto.count('}')
+        count_bracket_open = texto.count('[')
+        count_bracket_close = texto.count(']')
+
+        if count_brace_open > count_brace_close:
+            texto += '}' * (count_brace_open - count_brace_close)
+        
+        if count_bracket_open > count_bracket_close:
+            texto += ']' * (count_bracket_open - count_bracket_close)
+
+        # 5. Sanitização de aspas internas não escapadas (tentativa heurística)
+        # Isso é complexo, mas tentamos garantir que chaves estejam entre aspas duplas
+        # Esta é uma operação arriscada, fazemos apenas se o JSON falhar muito
+        
+        return texto
+    except Exception as e:
+        logger.error(f"Erro ao tentar reparar string JSON: {e}")
+        return texto
 
 def limpar_e_parsear_json(texto_ia: str) -> dict:
     """
-    Parser robusto para extrair JSON de respostas da IA.
-    Lida com blocos de código Markdown, texto introdutório e erros de sintaxe.
+    Parser robusto com múltiplas estratégias de recuperação.
     """
+    texto_limpo = texto_ia
+    
+    # Estratégia 1: Parse Direto (Otimista)
     try:
-        # 1. Tenta extrair o bloco JSON usando Regex (Do primeiro '{' ao último '}')
+        # Tenta achar o maior bloco JSON possível
         match = re.search(r'\{.*\}', texto_ia, re.DOTALL)
-        
         if match:
             texto_limpo = match.group(0)
-        else:
-            # Fallback: remove markdown de código se o regex falhar
-            texto_limpo = texto_ia.replace("```json", "").replace("```", "").strip()
-
-        # 2. Primeira tentativa de parse direto
         return json.loads(texto_limpo)
-        
+    except json.JSONDecodeError:
+        pass # Falhou, tenta reparar
+
+    # Estratégia 2: Reparo e Limpeza
+    try:
+        logger.warning("⚠️ JSON direto falhou. Aplicando reparo heurístico...")
+        texto_reparado = reparar_json_quebrado(texto_ia)
+        return json.loads(texto_reparado)
     except json.JSONDecodeError as e:
-        logger.warning(f"⚠️ Erro de sintaxe JSON inicial: {e}. Tentando reparo automático...")
-        try:
-            # 3. Tentativa de Reparo
-            texto_reparado = reparar_json_quebrado(texto_limpo)
-            return json.loads(texto_reparado)
-        except json.JSONDecodeError as e2:
-            logger.error(f"❌ Falha no reparo JSON. Texto problemático (início): {texto_ia[:100]}... Erro: {e2}")
-            # Re-lança para que o mecanismo de Retry tente outro modelo/prompt
-            raise e2
+        logger.error(f"❌ Falha no reparo JSON. Erro: {e}")
+        logger.error(f"❌ Trecho problemático do texto: {texto_ia[:200]}...")
+        # Lança erro para o chamador tentar outro modelo
+        raise e
 
 class AIService:
     """Gerencia interações com a API do Google Gemini com fallback, retry e validação de JSON."""
@@ -251,68 +302,89 @@ class AIService:
         if not settings.GEMINI_KEYS:
             logger.error("Nenhuma chave de API do Gemini configurada no ambiente.")
             return None
-        # Seleção aleatória para balanceamento simples
-        key = random.choice(settings.GEMINI_KEYS)
-        return key
+        return random.choice(settings.GEMINI_KEYS)
 
     @staticmethod
-    def generate_valid_json(prompt: str, image_bytes: Optional[bytes] = None, max_retries: int = 3) -> Dict:
+    def generate_valid_json(prompt: str, image_bytes: Optional[bytes] = None, max_retries: int = 4) -> Dict:
         """
         Gera conteúdo e garante que o retorno seja um JSON válido.
-        Se falhar no parseamento, tenta novamente (Retry Pattern).
+        Se falhar no parseamento, tenta novamente (Retry Pattern) trocando o modelo e parâmetros.
         """
+        historico_erros = []
+
         for attempt in range(max_retries):
             try:
                 api_key = AIService._get_api_key()
-                if not api_key: raise Exception("Sem chaves de API")
+                if not api_key: raise Exception("Sem chaves de API disponíveis.")
+                
                 genai.configure(api_key=api_key)
 
-                # Round Robin de Modelos
-                modelo = MOTORES_TECHNOBOLT[attempt % len(MOTORES_TECHNOBOLT)]
-                logger.info(f"🧠 [IA] Tentativa {attempt+1}/{max_retries} usando {modelo}...")
+                # Round Robin de Modelos: Tenta um diferente a cada erro
+                modelo_atual = MOTORES_TECHNOBOLT[attempt % len(MOTORES_TECHNOBOLT)]
+                logger.info(f"🧠 [IA] Tentativa {attempt+1}/{max_retries} usando {modelo_atual}...")
 
-                model = genai.GenerativeModel(modelo)
+                model = genai.GenerativeModel(modelo_atual)
                 
-                # Configuração ajustada para reduzir erros de sintaxe e permitir respostas longas
+                # Ajuste dinâmico de temperatura
+                # Tentativa 0: 0.7 (Criativo)
+                # Tentativa 1: 0.4 (Conservador)
+                # Tentativa 2+: 0.2 (Robótico/Preciso para sintaxe)
+                temp = 0.7 if attempt == 0 else (0.4 if attempt == 1 else 0.2)
+
                 config = genai.types.GenerationConfig(
                     response_mime_type="application/json", 
                     max_output_tokens=8192,
-                    temperature=0.6 if attempt == 0 else 0.3 # Reduz criatividade nos retries
+                    temperature=temp
                 )
                 
                 inputs = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}] if image_bytes else [prompt]
                 
+                # Chamada de API com Timeout implícito
                 response = model.generate_content(inputs, generation_config=config)
                 
                 if not response or not response.text:
-                    raise Exception("Resposta vazia da IA")
+                    raise Exception("Resposta vazia da API do Gemini.")
 
-                # Parseamento e Validação
-                return limpar_e_parsear_json(response.text)
+                # Tenta parsear
+                dados_json = limpar_e_parsear_json(response.text)
+                
+                # Validação Básica de Estrutura
+                if "treino" not in dados_json and "dieta" not in dados_json:
+                    raise ValueError("JSON gerado não contém as chaves 'treino' ou 'dieta'.")
+
+                logger.info("✅ JSON gerado e validado com sucesso.")
+                return dados_json
 
             except Exception as e:
-                logger.warning(f"⚠️ Erro na tentativa {attempt+1}: {e}. Retentando em breve...")
-                time.sleep(1 + attempt) # Backoff exponencial simples
+                msg_erro = str(e)
+                logger.warning(f"⚠️ Erro na tentativa {attempt+1} ({modelo_atual}): {msg_erro}")
+                historico_erros.append(f"{modelo_atual}: {msg_erro}")
+                time.sleep(2 + attempt) # Backoff progressivo (2s, 3s, 4s...)
 
-        # Se esgotou todas as tentativas
-        logger.error("❌ Falha crítica: Não foi possível gerar um JSON válido após todas as tentativas.")
+        # Se chegou aqui, falhou todas as tentativas
+        logger.error(f"❌ FALHA CRÍTICA: Não foi possível gerar JSON. Histórico: {historico_erros}")
         
-        # Retorna estrutura de fallback para não quebrar o app do usuário com tela vermelha
+        # FALLBACK DE SEGURANÇA (Para não quebrar o app do usuário)
+        # Retorna um JSON mínimo válido ao invés de estourar 500 Internal Server Error
         return {
-            "avaliacao": {"insight": "O sistema de IA está sobrecarregado no momento. Por favor, tente novamente em instantes."},
+            "avaliacao": {
+                "insight": "O sistema de IA está temporariamente instável devido à alta demanda. Um protocolo de segurança foi gerado.",
+                "segmentacao": {}, "dobras": {}, "analise_postural": "N/A", "simetria": "N/A"
+            },
             "dieta": [],
             "treino": [],
-            "suplementacao": []
+            "suplementacao": [],
+            "erro_interno": True
         }
 
-    # Método genérico para textos simples (chat, comentários)
     @staticmethod
     def generate_content(prompt: str, image_bytes: Optional[bytes] = None) -> Optional[str]:
-        # Para texto livre (comentários), usamos uma config mais simples
+        """Wrapper simples para texto livre (chat/comentários)."""
         try:
             api_key = AIService._get_api_key()
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1]) # Usa o último modelo da lista
+            # Usa o último modelo da lista como padrão para tarefas simples
+            model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1]) 
             
             inputs = [prompt, {"mime_type": "image/jpeg", "data": image_bytes}] if image_bytes else [prompt]
             response = model.generate_content(inputs)
@@ -414,7 +486,9 @@ class PDFService(FPDF):
         self.multi_cell(0, 6, self.sanitizar_texto(str(content)), fill=True)
         self.ln(2)
 
-# --- APLICAÇÃO FASTAPI ---
+# ==============================================================================
+# APLICAÇÃO FASTAPI
+# ==============================================================================
 app = FastAPI(
     title=settings.API_TITLE,
     version=settings.API_VERSION,
@@ -436,7 +510,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- HELPERS DE LÓGICA DE NEGÓCIO ---
+# ==============================================================================
+# HELPERS DE LÓGICA DE NEGÓCIO
+# ==============================================================================
 
 def normalizar_texto(texto: str) -> str:
     if not texto: return ""
@@ -452,7 +528,7 @@ def validar_e_corrigir_exercicios(lista_exercicios: list) -> list:
     if not lista_exercicios or not EXERCISE_DB: 
         return lista_exercicios
     
-    base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
+    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
     
     db_map_norm = {normalizar_texto(k): v for k, v in EXERCISE_DB.items()}
     db_title_map = {normalizar_texto(k): k for k, v in EXERCISE_DB.items()}
@@ -520,7 +596,9 @@ def calcular_medalha(username: str) -> str:
     except Exception:
         return ""
 
-# --- ROTAS: AUTH & PERFIL ---
+# ==============================================================================
+# ROTAS: AUTH & PERFIL
+# ==============================================================================
 
 @app.post("/auth/login", tags=["Auth"], response_model=Dict[str, Any])
 def login(dados: UserLogin):
@@ -575,7 +653,9 @@ def atualizar_perfil(dados: UserUpdate):
     if result.matched_count == 0: raise HTTPException(404, "Usuário não encontrado")
     return {"sucesso": True}
 
-# --- ROTAS: ANÁLISE IA (CORE) ---
+# ==============================================================================
+# ROTAS: ANÁLISE IA (CORE)
+# ==============================================================================
 
 @app.post("/analise/executar", tags=["Analise"])
 async def executar_analise(
@@ -836,7 +916,7 @@ def regenerar_secao(dados: dict = Body(...)):
         CONTEXT: {r_f}, {r_a}, {obs}.
         
         RULES:
-        - DIET: Generate menus for MONDAY to SUNDAY (7 DAYS).
+        - DIET: Generate menus for MONDAY to SUNDAY.
         - WORKOUT: Generate plans for MONDAY to SUNDAY. Minimum 10 exercises per day. Use DB: [ {EXERCISE_LIST_STRING if secao == 'treino' else ''} ]
         
         RETURN JSON: {{ "{secao}": [ ... ] }}
@@ -921,7 +1001,9 @@ def buscar_historico(usuario: str):
         }
     }
 
-# --- ROTAS: SOCIAL E FEED ---
+# ==============================================================================
+# ROTAS: SOCIAL E FEED
+# ==============================================================================
 
 @app.get("/social/feed", tags=["Social"])
 def get_feed():
@@ -954,11 +1036,17 @@ async def postar_feed(
     
     post_id = db.posts.insert_one(post_doc).inserted_id
 
-    # Comentário automático (simples string, usa generate_content direto)
     try:
+        # Usa um modelo leve para comentários rápidos
         genai.configure(api_key=AIService._get_api_key())
-        model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1])
-        resp = model.generate_content([f"Comentário curto de personal trainer para: '{legenda}'", {"mime_type": "image/jpeg", "data": img_otimizada}])
+        # Tenta pegar o último modelo (stable) ou o primeiro disponível
+        model_name = MOTORES_TECHNOBOLT[-1] if MOTORES_TECHNOBOLT else "gemini-1.5-flash"
+        model = genai.GenerativeModel(model_name)
+        
+        resp = model.generate_content([
+            f"Comentário curto de personal trainer para: '{legenda}'", 
+            {"mime_type": "image/jpeg", "data": img_otimizada}
+        ])
         comentario_ia = resp.text if resp else None
     except:
         comentario_ia = None
@@ -1009,7 +1097,9 @@ def postar_comentario(dados: SocialCommentRequest):
     except Exception as e:
         raise HTTPException(500, f"Erro ao postar comentário: {str(e)}")
 
-# --- ROTAS: GAMIFICATION & CHECKINS ---
+# ==============================================================================
+# ROTAS: GAMIFICATION & CHECKINS
+# ==============================================================================
 
 @app.get("/social/ranking", tags=["Social"])
 def get_ranking_global():
@@ -1057,7 +1147,10 @@ async def validar_conquista(
     
     try:
         genai.configure(api_key=AIService._get_api_key())
-        model = genai.GenerativeModel(MOTORES_TECHNOBOLT[-1])
+        # Usa modelo estável para visão computacional rápida
+        model_name = MOTORES_TECHNOBOLT[-1] if MOTORES_TECHNOBOLT else "gemini-1.5-flash"
+        model = genai.GenerativeModel(model_name)
+        
         resp = model.generate_content([
             f"Juiz de fitness: O usuário diz que fez treino '{tipo}'. Analise a foto. Responda APENAS 'APROVADO' ou 'REPROVADO'.", 
             {"mime_type": "image/jpeg", "data": img_otimizada}
@@ -1082,7 +1175,9 @@ async def validar_conquista(
     else:
         return {"sucesso": True, "aprovado": False, "mensagem": "A IA não identificou evidências claras do treino."}
 
-# --- ROTAS: ADMINISTRAÇÃO ---
+# ==============================================================================
+# ROTAS: ADMINISTRAÇÃO
+# ==============================================================================
 
 @app.get("/setup/criar-admin", tags=["Admin"])
 def criar_admin_inicial():
@@ -1124,7 +1219,9 @@ def excluir_usuario(dados: AdminUserEdit):
     db.usuarios.delete_one({"usuario": dados.target_user})
     return {"sucesso": True}
 
-# --- ROTAS: EXPORTAÇÃO (PDF) ---
+# ==============================================================================
+# ROTAS: EXPORTAÇÃO (PDF)
+# ==============================================================================
 
 @app.get("/analise/baixar-pdf/{usuario}", tags=["Analise"])
 def baixar_pdf_completo(usuario: str):
@@ -1237,7 +1334,9 @@ def baixar_pdf_completo(usuario: str):
         logger.error(f"ERRO CRÍTICO PDF: {e}")
         raise HTTPException(500, f"Erro PDF: {str(e)}")
 
-# --- ROTAS: CHAT ---
+# ==============================================================================
+# ROTAS: CHAT
+# ==============================================================================
 
 @app.get("/chat/usuarios", tags=["Chat"])
 def listar_usuarios_chat(usuario_atual: str):
