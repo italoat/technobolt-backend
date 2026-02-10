@@ -1,6 +1,6 @@
 """
 TechnoBolt Gym Hub API - Enterprise Edition
-Version: 108.4-Titanium-JSON-Shield
+Version: 108.5-Titanium-JSON-Nuclear-Fix
 Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline & Multi-Level Rotation
 Copyright (c) 2026 TechnoBolt Solutions.
 """
@@ -148,7 +148,7 @@ class Settings:
         
         # Metadados da API
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "108.4-Titanium-JSON-Shield"
+        self.API_VERSION = "108.5-Titanium-JSON-Nuclear-Fix"
         self.ENV = self._get_env("ENV", "production")
         
         # Carregamento dinâmico de chaves de API (Load Balancer)
@@ -166,12 +166,10 @@ class Settings:
         ]
         
         # Formatter (Estruturação):
-        # ALTERAÇÃO TÉCNICA CRÍTICA: O modelo 'flash-latest' estava falhando (Erro 503 JSON).
-        # Estamos promovendo o '2.5-flash' (já existente na sua conta) para esta função, 
-        # pois ele tem melhor aderência à sintaxe JSON.
+        # Mantendo 'gemini-2.5-flash' como primário pois 'flash-latest' estava falhando muito.
         self.STRUCTURING_MODELS = [
-            "models/gemini-2.5-flash",      # Robusto (Evita erros de vírgula)
-            "models/gemini-flash-latest"    # Fallback Rápido
+            "models/gemini-2.5-flash",      # Robusto
+            "models/gemini-flash-latest"    # Fallback
         ]
         
         logger.info(f"🧠 Motores de Raciocínio Ativos: {self.REASONING_MODELS}")
@@ -518,10 +516,17 @@ class JSONRepairKit:
         # Remove vírgulas trailing (Ex: {"a": 1,})
         text = re.sub(r',(\s*[}\]])', r'\1', text)
         
-        # REGEX DE REPARO AVANÇADO (Adicionado para corrigir erro "Expecting ',' delimiter")
-        # Insere vírgula entre fechamento e abertura de chaves/colchetes se faltar
+        # --- NUCLEAR FIX para "Expecting ',' delimiter" ---
+        # A regex abaixo encontra um fechamento de objeto '}' ou array ']', 
+        # seguido opcionalmente de espaço em branco (incluindo quebra de linha),
+        # seguido de uma abertura de objeto '{' ou array '['.
+        # E insere a vírgula faltante.
+        # Ex: "...treino A" } { "dia": "..."  -> "...treino A" }, { "dia": "..."
         text = re.sub(r'([}\]])\s*([{\[])', r'\1,\2', text)
-        text = re.sub(r'([}\]])\s*"', r'\1,"', text) # Entre objeto e chave string
+        
+        # Corrige aspas faltando após fechamento
+        # Ex: "valor" } "chave" -> "valor" }, "chave"
+        text = re.sub(r'([}\]])\s*"', r'\1,"', text) 
         
         # Tentativa de balanceamento de chaves (JSON Truncado)
         open_braces = text.count('{')
@@ -683,6 +688,7 @@ class AIOrchestrator:
         3. NO EMPTY ARRAYS: The 'dieta', 'treino', and 'suplementacao' arrays MUST contain data. If the source is vague, use your expert knowledge to fill in standard bodybuilding protocols for the user's goal.
         4. EXERCISE MAPPING: Map exercises to this list if possible: [{exercise_list}]. If not found, use a logical name.
         5. MINIMUM VOLUME: Ensure at least 6 exercises per workout session.
+        6. SYNTAX SAFETY: DOUBLE CHECK COMMAS between objects in arrays. Escape all quotes inside strings.
         
         REQUIRED JSON SCHEMA:
         {{
