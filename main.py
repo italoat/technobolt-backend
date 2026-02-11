@@ -1,9 +1,9 @@
 """
 TechnoBolt Gym Hub API - Enterprise Architect Edition
-Version: 2026.5.1-Titanium-Max-Tuned
+Version: 2026.5.2-Titanium-Max-Ultra
 Architecture: Modular Monolith | Hexagonal-ish | Event-Driven AI Pipeline
 Author: TechnoBolt Engineering Team (Principal Architect)
-Timestamp: 2026-02-11 17:15:00 UTC
+Timestamp: 2026-02-11 17:30:00 UTC
 
 System Overview:
 This backend serves as the central nervous system for the TechnoBolt ecosystem.
@@ -15,6 +15,7 @@ Key Design Patterns:
 - Chain-of-Thought (CoT): For high-reasoning AI generation.
 - Circuit Breaker & Retry: For resilient external API communication.
 - Structured Logging: For observability and distributed tracing.
+- Domain-Driven Design (DDD): Logic encapsulation within service layers.
 """
 
 import os
@@ -104,7 +105,10 @@ from fpdf import FPDF
 # ==============================================================================
 
 class RequestContext:
-    """Stores context for the current request execution flow."""
+    """
+    Context manager for request-scoped data.
+    Ensures that every log message can be traced back to a specific user request.
+    """
     _request_id: str = "system-startup"
 
     @classmethod
@@ -118,12 +122,12 @@ class RequestContext:
 class EnterpriseLogger:
     """
     Structured logging system designed for high-concurrency production environments.
-    Ensures every log entry is traceable to a specific request ID.
+    Ensures every log entry is traceable to a specific request ID and provides standardized formatting.
     """
     
     @staticmethod
     def setup() -> logging.Logger:
-        """Configures the root logger with custom formatting."""
+        """Configures the root logger with custom formatting and stream handling."""
         logger = logging.getLogger("TechnoBoltAPI")
         logger.setLevel(logging.INFO)
         
@@ -161,6 +165,7 @@ def initialize_media_drivers():
     """
     Registers external codecs for image processing.
     Crucial for handling HEIC uploads from iOS devices in the Flutter app.
+    This runs once at startup.
     """
     try:
         logger.info("🔧 Initializing Pillow HEIF opener...")
@@ -202,7 +207,7 @@ class Settings:
         
         # API Metadata
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "121.0-Architect"
+        self.API_VERSION = "2026.5.2-Titanium-Max-Ultra"
         self.ENV = self._get_env("ENV", "production")
         
         # AI Configuration (Load Balancer Pool)
@@ -885,23 +890,29 @@ class AIOrchestrator:
                 # --- PHASE 1: REASONING (The Brain) ---
                 logger.info(f"🧠 [Phase 1 - Reasoning] Running on {model}...")
                 
-                # UPDATE 1: Enhanced Physical Assessment & Caloric Surplus Logic
+                # UPDATE 1: Enhanced Physical Assessment, Caloric Surplus, and Training Volume
                 prompt_p1 = context_prompt + """
                 \n\nCRITICAL INSTRUCTION: Think step-by-step. Generate a HIGHLY DETAILED, VERBOSE text strategy. 
                 Do not output JSON yet. Focus on:
                 
-                1. VISUAL ASSESSMENT: 
-                   - Analyze posture, symmetry, muscle insertions, and estimated body fat % from the image. 
-                   - Be specific about weak points.
+                1. VISUAL ASSESSMENT (MANDATORY & DETAILED):
+                   - Analyze posture (kyphosis, lordosis, head tilt).
+                   - Analyze symmetry (left vs right, upper vs lower).
+                   - Estimate Body Fat % visually.
+                   - Identify weak muscle groups that need prioritization.
+                   - DO NOT return generic advice. Use the image data.
                 
-                2. DIET & CALORIC SURPLUS:
-                   - Explicitly state the daily caloric surplus target (e.g., +300kcal).
-                   - Calculate total daily calories and macros.
-                   - Show the math: BMR + Activity + Surplus.
+                2. DIET & CALORIC SURPLUS (HYPERTROPHY FOCUSED):
+                   - Calculate Basal Metabolic Rate (BMR) and Total Daily Energy Expenditure (TDEE).
+                   - Explicitly state the daily caloric surplus target (e.g., +300-500kcal).
+                   - Break down macros: Protein (high), Carbs (moderate/high), Fats (moderate).
+                   - Show the math: BMR + Activity + Surplus = Total Calories.
                 
-                3. TRAINING OPTIMIZATION:
-                   - Ensure High Volume (10+ exercises per session).
-                   - PROVIDE BIOMECHANICAL JUSTIFICATION for every single exercise. Explain WHY it was chosen.
+                3. TRAINING OPTIMIZATION (HIGH VOLUME - MAXIMIZE MONDAY):
+                   - MONDAY (International Chest Day/Focus Day): Must be the highest volume day. Aim for 10-12 exercises.
+                   - OTHER DAYS: Maintain high volume (8-10 exercises), but slightly less than Monday.
+                   - BIOMECHANICAL JUSTIFICATION: For EVERY exercise, explain WHY it was chosen (e.g., 'Incline Dumbbell Press chosen to target the clavicular head of the pectoralis major...').
+                   - Progressive Overload strategy must be clear.
                 """
                 
                 strategy_text = AIOrchestrator._call_gemini_with_retry(
@@ -918,7 +929,7 @@ class AIOrchestrator:
                 
                 exercise_list_str = ExerciseRepository.get_keys_string()
                 
-                # UPDATE 2: Strict JSON Schema Enforcement
+                # UPDATE 2: Strict JSON Schema Enforcement with new fields
                 prompt_p2 = f"""
                 TASK: Act as a Strict JSON Compiler.
                 Convert the following Fitness Strategy into VALID JSON matching the schema.
@@ -942,6 +953,7 @@ class AIOrchestrator:
                       "analise_postural": "Txt", 
                       "simetria": "Txt", 
                       "estimativa_gordura": "Txt",
+                      "pontos_fracos": "Txt",
                       "insight": "Txt" 
                   }},
                   "dieta": [ 
@@ -949,6 +961,7 @@ class AIOrchestrator:
                       "dia": "Segunda", 
                       "foco_nutricional": "Txt", 
                       "superavit_calorico": "Txt",
+                      "calculo_calorico": "Txt",
                       "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ], 
                       "macros_totais": "Txt" 
                     }}, 
@@ -1109,9 +1122,9 @@ async def execute_analysis_endpoint(
     GOAL: {objetivo}. 
     RESTRICTIONS: {user.get('restricoes_fis', 'None')}, {user.get('restricoes_alim', 'None')}.
     TASKS: 
-    1. Visual Assessment (Be critical).
-    2. Diet for Hypertrophy (Surplus required).
-    3. High Volume Training (10+ Exercises/day).
+    1. Visual Assessment (Be critical, look for symmetries).
+    2. Diet for Hypertrophy (Surplus required, show math).
+    3. High Volume Training (Maximize Monday, justify exercises).
     4. Advanced Supplementation.
     """
     
@@ -1155,7 +1168,7 @@ async def regenerate_section_endpoint(dados: dict = Body(...)):
     user = col.find_one({"usuario": dados.get("usuario")})
     if not user: return {"sucesso": False}
     
-    prompt = f"Regenerate ONLY the '{dados.get('secao')}' section for {user.get('nome')}. Make it intense."
+    prompt = f"Regenerate ONLY the '{dados.get('secao')}' section for {user.get('nome')}. Context: {dados.get('dia')}. Make it intense and detailed."
     try:
         new_content = AIOrchestrator.execute_chain_of_thought(prompt, None)
         # Merging logic...
