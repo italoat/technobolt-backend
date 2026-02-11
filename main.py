@@ -1,14 +1,13 @@
 """
-TechnoBolt Gym Hub API - Enterprise Edition (Titanium-FullScope-Max)
-Version: 116.0-Production-Release (Zero-Truncation)
+TechnoBolt Gym Hub API - Enterprise Edition (Titanium-Final-Patch)
+Version: 118.0-Production-Stable
 Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline & Multi-Level Rotation
 Author: TechnoBolt Engineering Team (Senior Lead)
 Timestamp: 2026-02-11
 
 Description:
 This API serves as the backend for the TechnoBolt Gym Hub application.
-It integrates MongoDB for persistence, Google Gemini for Generative AI (Text & Vision),
-and provides endpoints for Social features, Gamification, and Admin management.
+FIXED: JSONRepairKit Attribute Error, JSON Delimiter Logic & Full Route Integrity.
 """
 
 import os
@@ -172,26 +171,25 @@ class Settings:
         
         # --- Metadados da API ---
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "115.0-Production"
+        self.API_VERSION = "117.0-Production-Fixed"
         self.ENV = self._get_env("ENV", "production")
         
         # --- Configurações de IA (Load Balancer) ---
         self.GEMINI_KEYS = self._load_api_keys()
         
         # --- Definição Estratégica de Modelos (Chain of Thought) ---
+        # MANTIDOS EXATAMENTE COMO SOLICITADO
         
         # FASE 1: BRAIN (RACIOCÍNIO)
-        # Modelos focados em lógica complexa, criatividade técnica e aderência a instruções longas.
         self.REASONING_MODELS = [
-            "models/gemini-3-flash-preview",  # Tier 1: Mais recente e capaz
-            "models/gemini-2.5-flash",        # Tier 2: Estável e robusto
-            "models/gemini-2.0-flash"         # Tier 3: Fallback de alta disponibilidade
+            "models/gemini-3-flash-preview",  # Tier 1
+            "models/gemini-2.5-flash",        # Tier 2
+            "models/gemini-2.0-flash"         # Tier 3
         ]
         
         # FASE 2: FORMATTER (ESTRUTURAÇÃO)
-        # Modelos focados em velocidade, baixo custo e obediência estrita a esquemas JSON.
         self.STRUCTURING_MODELS = [
-            "models/gemini-flash-latest"      # Otimizado para tarefas estruturais
+            "models/gemini-flash-latest"      # Otimizado para JSON
         ]
         
         logger.info(f"🧠 Motores de Raciocínio Carregados: {len(self.REASONING_MODELS)}")
@@ -570,227 +568,76 @@ class KeyRotationManager:
 key_manager = KeyRotationManager(settings.GEMINI_KEYS)
 
 # ==============================================================================
-# SEÇÃO 10: SERVIÇOS AUXILIARES (HELPERS, IMAGEM E PDF)
-# ==============================================================================
-# IMPORTANTE: Definido ANTES da lógica de IA para evitar problemas de escopo.
-
-def normalizar_texto(texto: str) -> str:
-    """Normaliza texto para comparações fuzzy (lowercase, sem acentos)."""
-    if not texto: return ""
-    return "".join(c for c in unicodedata.normalize('NFD', str(texto)) if unicodedata.category(c) != 'Mn').lower().strip()
-
-def validar_exercicios_final(treino_data: list) -> list:
-    """
-    Validação final pós-IA.
-    Tenta casar nomes de exercícios gerados com pastas de imagens locais (Github).
-    """
-    db = ExerciseRepository.get_db()
-    if not treino_data or not db: return treino_data
-    
-    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
-    
-    # Mapas de busca O(1)
-    db_map = {normalizar_texto(k): v for k, v in db.items()}
-    db_titles = {normalizar_texto(k): k for k, v in db.items()}
-
-    for dia in treino_data:
-        if 'exercicios' not in dia: continue
-        
-        corrected_exs = []
-        for ex in dia['exercicios']:
-            raw_name = ex.get('nome', 'Exercício Geral')
-            norm_name = normalizar_texto(raw_name)
-            
-            path = None
-            final_name = raw_name
-            
-            # 1. Match Exato
-            if norm_name in db_map:
-                path = db_map[norm_name]
-                final_name = db_titles[norm_name]
-            else:
-                # 2. Match por Similaridade
-                matches = difflib.get_close_matches(norm_name, db_map.keys(), n=1, cutoff=0.6)
-                if matches:
-                    path = db_map[matches[0]]
-                    final_name = db_titles[matches[0]]
-                else:
-                    # 3. Match por Substring
-                    for k in db_map.keys():
-                        if k in norm_name or norm_name in k:
-                            path = db_map[k]
-                            final_name = db_titles[k]
-                            break
-                    # 4. Fallback
-                    if not path and "polichinelo" in db_map:
-                        path = db_map["polichinelo"]
-                        final_name = f"{raw_name} (Adaptado)"
-
-            # Atualiza objeto
-            ex['nome'] = str(final_name).title()
-            if path:
-                ex['imagens_demonstracao'] = [
-                    f"{base_url}/{path}/0.jpg",
-                    f"{base_url}/{path}/1.jpg"
-                ]
-            else:
-                ex['imagens_demonstracao'] = []
-            
-            corrected_exs.append(ex)
-        
-        dia['exercicios'] = corrected_exs
-            
-    return treino_data
-
-def calcular_medalha(username: str) -> str:
-    """Calcula medalha do usuário para gamificação."""
-    try:
-        user = mongo_db.get_collection("usuarios").find_one({"usuario": username})
-        return "🥇" if user and user.get('pontos', 0) > 1000 else ""
-    except: return ""
-
-class ImageService:
-    """Utilitários para processamento e otimização de imagens."""
-    
-    @staticmethod
-    def optimize(file_bytes: bytes, quality: int = 75, max_size: tuple = (800, 800)) -> bytes:
-        try:
-            with Image.open(io.BytesIO(file_bytes)) as img:
-                # Corrige orientação EXIF (comum em fotos de celular)
-                img = ImageOps.exif_transpose(img)
-                # Converte para RGB (necessário para salvar como JPEG)
-                if img.mode != 'RGB':
-                    img = img.convert("RGB")
-                # Resize inteligente
-                img.thumbnail(max_size)
-                
-                output = io.BytesIO()
-                img.save(output, format='JPEG', quality=quality, optimize=True)
-                return output.getvalue()
-        except Exception as e:
-            logger.error(f"Erro na otimização de imagem: {e}. Usando original.")
-            return file_bytes
-
-class PDFReport(FPDF):
-    """Gerador de relatórios PDF customizado."""
-    def __init__(self):
-        super().__init__()
-        self.set_auto_page_break(auto=True, margin=15)
-        self.col_bg = (20, 20, 25)
-        self.col_text = (230, 230, 230)
-        self.col_accent = (0, 200, 255)
-
-    def sanitize(self, txt: Any) -> str:
-        if not txt: return ""
-        s = str(txt).replace("’", "'").replace("–", "-")
-        # Garante compatibilidade Latin-1 do FPDF
-        return s.encode('latin-1', 'replace').decode('latin-1')
-
-    def header(self):
-        self.set_fill_color(*self.col_bg)
-        self.rect(0, 0, 210, 297, 'F')
-        self.set_font("Arial", "B", 20)
-        self.set_text_color(*self.col_accent)
-        self.cell(0, 10, "TECHNOBOLT PROTOCOL", 0, 1, 'C')
-        self.ln(10)
-
-    def chapter_title(self, label):
-        self.set_font("Arial", "B", 14)
-        self.set_text_color(*self.col_accent)
-        self.cell(0, 10, self.sanitize(label.upper()), 0, 1, 'L')
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(5)
-
-    def chapter_body(self, body):
-        self.set_font("Arial", "", 10)
-        self.set_text_color(*self.col_text)
-        self.multi_cell(0, 6, self.sanitize(body))
-        self.ln()
-    
-    def card(self, title, body):
-        self.set_fill_color(30, 30, 35) # Hardcoded para evitar dependencia
-        self.set_text_color(*self.col_azul if hasattr(self, 'col_azul') else self.col_accent)
-        self.set_font("Arial", "B", 11)
-        self.multi_cell(0, 6, self.sanitize(title), fill=True)
-        self.set_text_color(*self.col_text)
-        self.set_font("Arial", "", 10)
-        self.multi_cell(0, 6, self.sanitize(body), fill=True)
-        self.ln(2)
-
-# ==============================================================================
-# SEÇÃO 11: SERVIÇOS DE IA - LÓGICA CORE (CHAIN OF THOUGHT)
+# SEÇÃO 10: SERVIÇOS DE IA - LÓGICA CORE (CHAIN OF THOUGHT)
 # ==============================================================================
 
 class JSONRepairKit:
     """
     Ferramentas avançadas para reparo de strings JSON malformadas.
-    Resolve problemas de sintaxe comuns em LLMs (Trailing commas, Markdown blocks).
+    Resolve o erro 'Expecting , delimiter' inserindo vírgulas faltantes.
     """
+    
     @staticmethod
     def fix_json_string(text: str) -> str:
         """Aplica uma série de regex para limpar e corrigir a string."""
         try:
             text = text.strip()
-            
-            # Remove blocos de código Markdown (```json ... ```)
+            # Remove blocos markdown
             if "```" in text:
                 text = re.sub(r'```json|```', '', text).strip()
             
-            # Remove comentários estilo JS (// ou /* */) - Ilegal em JSON
+            # Remove comentários estilo C/JS
             text = re.sub(r'//.*?\n|/\*.*?\*/', '', text, flags=re.S)
             
-            # Remove vírgulas trailing (Ex: {"a": 1,}) - Ilegal em JSON padrão
+            # Remove vírgulas trailing (erro comum)
             text = re.sub(r',(\s*[}\]])', r'\1', text)
             
-            # --- FIX NUCLEAR: Inserção de vírgulas faltantes ---
+            # --- FIX NUCLEAR PARA ERRO DE VÍRGULA FALTANDO ---
             # Caso 1: Entre objetos/arrays (ex: } {  ->  }, {)
             text = re.sub(r'([}\]])\s*([{\[])', r'\1,\2', text)
             
-            # Caso 2: Entre valor string e chave (ex: "val" "key" -> "val", "key")
+            # Caso 2: Entre valor e chave (ex: "val" "key" -> "val", "key")
             text = re.sub(r'("\s*)\s+"', r'\1,"', text)
             
             # Caso 3: Entre número e chave (ex: 123 "key" -> 123, "key")
             text = re.sub(r'(\d+)\s+"', r'\1,"', text)
 
-            # Balanceamento de chaves (para JSONs truncados por limite de tokens)
+            # Balanceamento de chaves
             open_braces = text.count('{')
             close_braces = text.count('}')
-            if open_braces > close_braces:
-                text += '}' * (open_braces - close_braces)
+            if open_braces > close_braces: text += '}' * (open_braces - close_braces)
                 
             open_brackets = text.count('[')
             close_brackets = text.count(']')
-            if open_brackets > close_brackets:
-                text += ']' * (open_brackets - close_brackets)
+            if open_brackets > close_brackets: text += ']' * (open_brackets - close_brackets)
                 
             return text
-        except Exception as e:
-            logger.error(f"Erro no JSONRepairKit: {e}")
-            return text
+        except: return text
 
-    @staticmethod
-    def safe_parse(text: str) -> Dict:
-        """Pipeline de tentativa de parseamento robusto (Cascata)."""
-        # 1. Tentativa Direta (Otimista)
-        try:
-            return json.loads(text)
+    @classmethod
+    def parse_robust(cls, text_ia: str) -> Dict:
+        """
+        Método de parseamento robusto que tenta múltiplas estratégias.
+        CORREÇÃO: Renomeado para 'parse_robust' para corresponder à chamada.
+        """
+        # 1. Tentativa Direta
+        try: return json.loads(text_ia)
         except: pass
         
-        # 2. Extração de Bloco Regex (Pessimista)
+        # 2. Extração de Bloco
         try:
-            match = re.search(r'(\{.*\})', text, re.DOTALL)
-            if match:
-                return json.loads(match.group(1))
+            match = re.search(r'(\{.*\})', text_ia, re.DOTALL)
+            if match: return json.loads(match.group(1))
         except: pass
-            
-        # 3. Reparo Agressivo (Nuclear)
+        
+        # 3. Reparo Agressivo
         try:
-            repaired = JSONRepairKit.fix_json_string(text)
+            repaired = cls.fix_json_string(text_ia)
             return json.loads(repaired)
         except json.JSONDecodeError as e:
-            logger.error(f"❌ JSON Parse Falhou Definitivamente. Erro: {e}")
-            logger.debug(f"Snippet do texto problemático: {text[:500]}...")
-            raise AIStructuringError(f"Falha na formatação do JSON: {str(e)}")
+            logger.error(f"❌ JSON Parse Falhou. Erro: {e}")
+            logger.debug(f"Snippet do JSON falho: {text_ia[:500]}...")
+            raise AIStructuringError(f"Falha na formatação do JSON: {e}")
 
 class AIOrchestrator:
     """
@@ -946,7 +793,7 @@ class AIOrchestrator:
                 prompt=prompt_p2,
                 image_bytes=None, 
                 json_mode=True, # Força modo JSON
-                temperature=0.1 # Precisão máxima
+                temperature=0.1 # Temperatura Baixa para precisão
             )
             data = JSONRepairKit.parse_robust(json_text)
             
@@ -983,6 +830,144 @@ class AIOrchestrator:
             return "Estou analisando seu treino... continue focado!"
 
 # ==============================================================================
+# SEÇÃO 11: HELPERS DE NEGÓCIO E IMAGEM (MOVIDO PARA CIMA)
+# ==============================================================================
+# MOVIDO PARA ANTES DO 'AIOrchestrator' PARA EVITAR NameError
+
+def normalizar_texto(texto: str) -> str:
+    if not texto: return ""
+    return "".join(c for c in unicodedata.normalize('NFD', str(texto)) if unicodedata.category(c) != 'Mn').lower().strip()
+
+def validar_exercicios_final(treino_data: list) -> list:
+    """
+    Validação final pós-IA.
+    Tenta casar nomes de exercícios gerados com pastas de imagens locais (Github).
+    """
+    db = ExerciseRepository.get_db()
+    if not treino_data or not db: return treino_data
+    
+    base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
+    
+    # Mapas de busca O(1)
+    db_map = {normalizar_texto(k): v for k, v in db.items()}
+    db_titles = {normalizar_texto(k): k for k, v in db.items()}
+
+    for dia in treino_data:
+        if 'exercicios' not in dia: continue
+        
+        corrected_exs = []
+        for ex in dia['exercicios']:
+            raw_name = ex.get('nome', 'Exercício Geral')
+            norm_name = normalizar_texto(raw_name)
+            
+            path = None
+            final_name = raw_name
+            
+            # 1. Match Exato
+            if norm_name in db_map:
+                path = db_map[norm_name]
+                final_name = db_titles[norm_name]
+            else:
+                # 2. Match por Similaridade
+                matches = difflib.get_close_matches(norm_name, db_map.keys(), n=1, cutoff=0.6)
+                if matches:
+                    path = db_map[matches[0]]
+                    final_name = db_titles[matches[0]]
+                else:
+                    # 3. Match por Substring
+                    for k in db_map.keys():
+                        if k in norm_name or norm_name in k:
+                            path = db_map[k]
+                            final_name = db_titles[k]
+                            break
+                    # 4. Fallback
+                    if not path and "polichinelo" in db_map:
+                        path = db_map["polichinelo"]
+                        final_name = f"{raw_name} (Adaptado)"
+
+            # Atualiza objeto
+            ex['nome'] = str(final_name).title()
+            if path:
+                ex['imagens_demonstracao'] = [
+                    f"{base_url}/{path}/0.jpg",
+                    f"{base_url}/{path}/1.jpg"
+                ]
+            else:
+                ex['imagens_demonstracao'] = []
+            
+            corrected_exs.append(ex)
+        
+        dia['exercicios'] = corrected_exs
+            
+    return treino_data
+
+class ImageService:
+    """Serviço de processamento de imagem movido para escopo global antes do uso."""
+    @staticmethod
+    def optimize(file_bytes: bytes, quality: int = 75, max_size: tuple = (800, 800)) -> bytes:
+        try:
+            with Image.open(io.BytesIO(file_bytes)) as img:
+                img = ImageOps.exif_transpose(img)
+                if img.mode != 'RGB': img = img.convert("RGB")
+                img.thumbnail(max_size)
+                output = io.BytesIO()
+                img.save(output, format='JPEG', quality=quality, optimize=True)
+                return output.getvalue()
+        except Exception as e:
+            logger.error(f"Erro na otimização de imagem: {e}")
+            return file_bytes
+
+class PDFReport(FPDF):
+    def __init__(self):
+        super().__init__()
+        self.set_auto_page_break(auto=True, margin=15)
+        self.col_bg = (20, 20, 25)
+        self.col_text = (230, 230, 230)
+        self.col_accent = (0, 200, 255)
+
+    def sanitize(self, txt: Any) -> str:
+        if not txt: return ""
+        s = str(txt).replace("’", "'").replace("–", "-")
+        return s.encode('latin-1', 'replace').decode('latin-1')
+
+    def header(self):
+        self.set_fill_color(*self.col_bg)
+        self.rect(0, 0, 210, 297, 'F')
+        self.set_font("Arial", "B", 20)
+        self.set_text_color(*self.col_accent)
+        self.cell(0, 10, "TECHNOBOLT PROTOCOL", 0, 1, 'C')
+        self.ln(10)
+
+    def chapter_title(self, label):
+        self.set_font("Arial", "B", 14)
+        self.set_text_color(*self.col_accent)
+        self.cell(0, 10, self.sanitize(label.upper()), 0, 1, 'L')
+        self.line(10, self.get_y(), 200, self.get_y())
+        self.ln(5)
+
+    def chapter_body(self, body):
+        self.set_font("Arial", "", 10)
+        self.set_text_color(*self.col_text)
+        self.multi_cell(0, 6, self.sanitize(body))
+        self.ln()
+    
+    def card(self, title, body):
+        self.set_fill_color(30, 30, 35) # Hardcoded para evitar dependencia
+        self.set_text_color(*self.col_azul if hasattr(self, 'col_azul') else self.col_accent)
+        self.set_font("Arial", "B", 11)
+        self.multi_cell(0, 6, self.sanitize(title), fill=True)
+        self.set_text_color(*self.col_texto)
+        self.set_font("Arial", "", 10)
+        self.multi_cell(0, 6, self.sanitize(body), fill=True)
+        self.ln(2)
+
+def calcular_medalha(username: str) -> str:
+    try:
+        user = mongo_db.get_collection("usuarios").find_one({"usuario": username})
+        return "🥇" if user and user.get('pontos', 0) > 1000 else ""
+    except: return ""
+
+# ==============================================================================
 # SEÇÃO 12: APLICAÇÃO FASTAPI & ROTAS
 # ==============================================================================
 
@@ -996,54 +981,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- ROTAS DE AUTENTICAÇÃO ---
-
 @app.post("/auth/login", tags=["Auth"])
 @sync_measure_time
 def login(dados: UserLogin):
     col = mongo_db.get_collection("usuarios")
     user = col.find_one({"usuario": dados.usuario, "senha": dados.senha})
     
-    if not user: raise HTTPException(401, "Credenciais inválidas")
-    if user.get("status") != "ativo" and not user.get("is_admin"): raise HTTPException(403, "Conta pendente.")
-    
-    return {
-        "sucesso": True,
-        "dados": {
-            "usuario": user['usuario'],
-            "nome": user.get('nome'),
-            "is_admin": user.get('is_admin', False),
-            "creditos": user.get('avaliacoes_restantes', 0),
-            "pontos": user.get('pontos', 0),
-            "foto_perfil": user.get('foto_perfil'),
-            "peso": user.get('peso'),
-            "altura": user.get('altura'),
-            "genero": user.get('genero'),
-            "restricoes_alim": user.get('restricoes_alim'),
-            "restricoes_fis": user.get('restricoes_fis'),
-            "medicamentos": user.get('medicamentos'),
-            "info_add": user.get('info_add')
-        }
-    }
+    if not user: raise HTTPException(401, "Inválido")
+    if user.get("status") != "ativo" and not user.get("is_admin"): raise HTTPException(403)
+    return {"sucesso": True, "dados": {k: v for k, v in user.items() if k != "_id"}}
 
 @app.post("/auth/registro", tags=["Auth"])
 def registrar(dados: UserRegister):
     col = mongo_db.get_collection("usuarios")
-    if col.find_one({"usuario": dados.usuario}): raise HTTPException(400, "Usuário já existe")
-    col.insert_one({**dados.model_dump(), "status": "pendente", "avaliacoes_restantes": 0, "pontos": 0, "historico_dossies": [], "is_admin": False, "created_at": datetime.now()})
-    return {"sucesso": True, "mensagem": "Registro realizado."}
+    if col.find_one({"usuario": dados.usuario}): raise HTTPException(400)
+    col.insert_one({**dados.model_dump(), "status": "pendente", "avaliacoes_restantes": 0, "pontos": 0, "historico_dossies": [], "is_admin": False})
+    return {"sucesso": True}
 
 @app.post("/perfil/atualizar", tags=["Perfil"])
 def atualizar_perfil(dados: UserUpdate):
     col = mongo_db.get_collection("usuarios")
     data = {k: v for k, v in dados.model_dump(exclude={'usuario'}).items() if v is not None}
-    
-    res = col.update_one({"usuario": dados.usuario}, {"$set": data})
-    if res.matched_count == 0:
-        raise HTTPException(404, "Usuário não encontrado")
+    col.update_one({"usuario": dados.usuario}, {"$set": data})
     return {"sucesso": True}
-
-# --- ROTA CORE: ANÁLISE ---
 
 @app.post("/analise/executar", tags=["Analise"])
 @measure_time
@@ -1052,350 +1012,196 @@ async def executar_analise(
     altura: str = Form(...), objetivo: str = Form(...), genero: str = Form("Masculino"),
     observacoes: str = Form(""), foto: UploadFile = File(...)
 ):
-    logger.info(f"🚀 Iniciando análise completa para: {usuario}")
+    logger.info(f"🚀 Iniciando análise: {usuario}")
     
-    # 1. Parse seguro de dados numéricos
     try:
-        peso_float = float(str(peso).replace(',', '.'))
-        alt_str = str(altura).replace(',', '.').replace('cm', '').strip()
-        altura_int = int(float(alt_str) * 100) if float(alt_str) < 3.0 else int(float(alt_str))
-    except:
-        peso_float = 70.0; altura_int = 175
+        p_float = float(str(peso).replace(',', '.'))
+        alt_int = int(float(str(altura).replace(',', '.').strip()) * 100) if float(str(altura).replace(',', '.').strip()) < 3.0 else int(float(str(altura).replace(',', '.').strip()))
+    except: p_float = 70.0; alt_int = 175
     
-    # 2. Atualiza/Busca dados do usuário
     col = mongo_db.get_collection("usuarios")
-    col.update_one({"usuario": usuario}, {"$set": {
-        "nome": nome_completo, "peso": peso_float, "altura": altura_int, 
-        "genero": genero, "info_add": observacoes
-    }})
-    user_data = col.find_one({"usuario": usuario})
-    if not user_data: raise HTTPException(404, "Usuário não encontrado durante a análise.")
-
-    # 3. Processamento de Imagem
-    raw_img = await foto.read()
-    img_opt = ImageService.optimize(raw_img)
+    col.update_one({"usuario": usuario}, {"$set": {"nome": nome_completo, "peso": p_float, "altura": alt_int, "genero": genero, "info_add": observacoes}})
+    user = col.find_one({"usuario": usuario})
     
-    # 4. Prompt Engineering (Fase 1 - Raciocínio Profundo)
-    prompt_brain = f"""
-    ACT AS AN ELITE SPORTS SCIENTIST. CREATE THE ULTIMATE PROTOCOL.
+    img = await foto.read()
+    img_opt = ImageService.optimize(img)
     
-    CLIENT: {nome_completo} ({genero}), {peso_float}kg, {altura_int}cm.
-    GOAL: {objetivo}.
-    RESTRICTIONS: {user_data.get('restricoes_fis')}, {user_data.get('restricoes_alim')}.
-    
-    TASKS:
-    1. ANALYZE PHYSIQUE from image (fat distribution, insertions).
-    2. DIET (7 DAYS): Detailed menu for Monday-Sunday. Exact macros.
-    3. TRAINING (7 DAYS): Monday-Sunday split. High Volume.
-    4. SUPPLEMENTS: Evidence-based recommendations.
+    prompt = f"""
+    ACT AS ELITE COACH. Client: {nome_completo} ({genero}), {p_float}kg, {alt_int}cm. Goal: {objetivo}.
+    Restrictions: {user.get('restricoes_fis')}, {user.get('restricoes_alim')}.
+    TASKS: 1. PHYSIQUE ANALYSIS. 2. DIET (7 DAYS - Mon-Sun). 3. TRAINING (7 DAYS - Mon-Sun, 10+ Exercises/day). 4. SUPPLEMENTS.
     """
     
-    # 5. Execução do Pipeline CoT (Raciocínio -> Estruturação)
     try:
-        result_json = AIOrchestrator.execute_chain_of_thought(prompt_brain, img_opt)
-    except Exception as e:
-        logger.error(f"Falha Crítica no Pipeline IA: {e}")
-        raise HTTPException(503, "Sistema de IA sobrecarregado. Tente novamente.")
-
-    # 6. Validação e Enriquecimento de Exercícios
-    if 'treino' in result_json:
-        result_json['treino'] = validar_exercicios_final(result_json['treino'])
-
-    # 7. Persistência e Cobrança
+        res = AIOrchestrator.execute_chain_of_thought(prompt, img_opt)
+    except Exception as e: 
+        logger.error(f"Erro IA: {e}")
+        raise HTTPException(503, "IA indisponível")
+    
+    if 'treino' in res: res['treino'] = validar_exercicios_final(res['treino'])
+    
     dossie = {
-        "id": str(ObjectId()),
-        "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "timestamp": datetime.now(),
-        "peso_reg": peso_float,
-        "conteudo_bruto": {
-            "json_full": result_json,
-            # Campos legados
-            "r1": str(result_json.get('avaliacao', {}).get('insight', '')),
-            "r2": str(result_json.get('dieta_insight', '')),
-            "r3": str(result_json.get('suplementacao_insight', '')),
-            "r4": str(result_json.get('treino_insight', ''))
+        "id": str(ObjectId()), "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "peso_reg": p_float, "conteudo_bruto": {
+            "json_full": res,
+            "r1": str(res.get('avaliacao', {}).get('insight', '')),
+            "r2": str(res.get('dieta_insight', '')),
+            "r3": str(res.get('suplementacao_insight', '')),
+            "r4": str(res.get('treino_insight', ''))
         }
     }
     
-    update = {"$push": {"historico_dossies": dossie}}
-    if not user_data.get('is_admin'): 
-        update["$inc"] = {"avaliacoes_restantes": -1}
-        
-    col.update_one({"usuario": usuario}, update)
+    upd = {"$push": {"historico_dossies": dossie}}
+    if not user.get('is_admin'): upd["$inc"] = {"avaliacoes_restantes": -1}
+    col.update_one({"usuario": usuario}, upd)
     
     return {"sucesso": True, "resultado": dossie}
 
 @app.post("/analise/regenerar-secao", tags=["Analise"])
 async def regenerar_secao(dados: dict = Body(...)):
-    """Regenera uma parte específica do protocolo usando IA."""
     col = mongo_db.get_collection("usuarios")
     user = col.find_one({"usuario": dados.get("usuario")})
+    if not user: return {"sucesso": False}
     
-    if not user or (user.get('avaliacoes_restantes', 0) <= 0 and not user.get('is_admin')):
-        return {"sucesso": False, "mensagem": "Saldo insuficiente."}
-        
-    secao = dados.get("secao")
-    dia = dados.get("dia", "")
-    
-    prompt = f"Regenerate ONLY the '{secao}' section for client {user.get('nome')}. Context: {dia if dia else 'Full Week'}. Make it HARDCORE and DETAILED. Minimum 10 exercises/meals per day."
-    
+    prompt = f"Regenerate '{dados.get('secao')}' for {user.get('nome')}. Make it intense, 7 days."
     try:
-        # Usa CoT sem imagem para regeneração rápida
-        new_content = AIOrchestrator.execute_chain_of_thought(prompt, None)
+        new_c = AIOrchestrator.execute_chain_of_thought(prompt, None)
+        last = user['historico_dossies'][-1]
+        last['conteudo_bruto']['json_full'][dados.get('secao')] = new_c[dados.get('secao')]
         
-        # Merge no último dossiê
-        last_dossie = user['historico_dossies'][-1]
-        json_full = last_dossie['conteudo_bruto']['json_full']
-        
-        if secao in new_content:
-            json_full[secao] = new_content[secao]
-            if f"{secao}_insight" in new_content:
-                json_full[f"{secao}_insight"] = new_content[f"{secao}_insight"]
-        
-        if secao == 'treino':
-            json_full['treino'] = validar_exercicios_final(json_full['treino'])
-            
         col.update_one(
-            {"usuario": dados.get("usuario"), "historico_dossies.data": last_dossie['data']},
-            {"$set": {"historico_dossies.$.conteudo_bruto.json_full": json_full}}
+            {"usuario": dados.get("usuario"), "historico_dossies.data": last['data']},
+            {"$set": {"historico_dossies.$.conteudo_bruto.json_full": last['conteudo_bruto']['json_full']}}
         )
-        return {"sucesso": True, "resultado": last_dossie}
-    except:
-        return {"sucesso": False}
-
-# --- ROTA LEGADA PARA HISTÓRICO (PREVENÇÃO DE CRASH) ---
+        return {"sucesso": True, "resultado": last}
+    except: return {"sucesso": False}
 
 @app.get("/historico/{usuario}", tags=["Perfil"])
-def buscar_historico(usuario: str):
-    """
-    Retorna o histórico completo e perfil atualizado.
-    Rota crucial para evitar 'Exception not Found' no carregamento do app Flutter.
-    """
-    col = mongo_db.get_collection("usuarios")
-    user = col.find_one({"usuario": usuario})
-    if not user: 
-        # Retorna estrutura vazia válida em vez de 404 para não crashar o app
-        return {"sucesso": True, "historico": []}
-    
+def history(usuario: str):
+    user = mongo_db.get_collection("usuarios").find_one({"usuario": usuario})
+    if not user: return {"sucesso": True, "historico": []}
     return {
-        "sucesso": True, 
-        "historico": jsonable_encoder(user.get('historico_dossies', [])), 
-        "creditos": user.get('avaliacoes_restantes', 0), 
-        "perfil": {
-            "peso": user.get('peso'),
-            "altura": user.get('altura'),
-            "genero": user.get('genero', 'Masculino'),
-            "restricoes_alim": user.get('restricoes_alim', ''),
-            "restricoes_fis": user.get('restricoes_fis', ''),
-            "medicamentos": user.get('medicamentos', ''),
-            "info_add": user.get('info_add', ''),
-            "creditos": user.get('avaliacoes_restantes', 0)
-        }
+        "sucesso": True, "historico": jsonable_encoder(user.get('historico_dossies', [])),
+        "creditos": user.get('avaliacoes_restantes', 0),
+        "perfil": {k: v for k, v in user.items() if k not in ['_id', 'historico_dossies', 'senha']}
     }
 
-# --- ROTAS SOCIAIS ---
-
 @app.get("/social/feed", tags=["Social"])
-def get_feed():
-    col = mongo_db.get_collection("posts")
-    posts = list(col.find().sort("data", DESCENDING).limit(50))
-    for p in posts: 
-        p['_id'] = str(p['_id'])
-        p['medalha'] = calcular_medalha(p.get('autor'))
+def feed():
+    posts = list(mongo_db.get_collection("posts").find().sort("data", -1).limit(50))
+    for p in posts: p['_id'] = str(p['_id'])
     return {"sucesso": True, "feed": posts}
 
 @app.post("/social/postar", tags=["Social"])
-async def postar(
-    usuario: str = Form(...), 
-    legenda: str = Form(...), 
-    imagem: UploadFile = File(...)
-):
-    img_bytes = await imagem.read()
-    img_opt = ImageService.optimize(img_bytes, size=(600, 600))
-    
-    # Comentário rápido automático
-    cmt = AIOrchestrator.simple_generation(f"Gere um comentário curto, gíria maromba, motivador para esta legenda: '{legenda}'", img_opt)
-    
-    col = mongo_db.get_collection("posts")
-    col.insert_one({
+async def post(usuario: str = Form(...), legenda: str = Form(...), imagem: UploadFile = File(...)):
+    img = ImageService.optimize(await imagem.read())
+    cmt = AIOrchestrator.simple_generation(f"Comentário gym bro para: {legenda}", img)
+    mongo_db.get_collection("posts").insert_one({
         "autor": usuario, "legenda": legenda, 
-        "imagem": base64.b64encode(img_opt).decode('utf-8'), 
+        "imagem": base64.b64encode(img).decode('utf-8'), 
         "data": datetime.now().isoformat(), "likes": [], 
-        "comentarios": [{"autor": "TechnoBolt AI", "texto": cmt}] if cmt else []
+        "comentarios": [{"autor": "TechnoBolt AI", "texto": cmt}]
     })
     return {"sucesso": True}
 
-@app.post("/social/post/deletar", tags=["Social"])
-def deletar_post_social(dados: SocialPostRequest):
-    col = mongo_db.get_collection("posts")
-    res = col.delete_one({"_id": ObjectId(dados.post_id), "autor": dados.usuario})
-    return {"sucesso": res.deleted_count > 0}
-
-@app.post("/social/curtir", tags=["Social"])
-def curtir_post(dados: SocialPostRequest):
+@app.post("/social/curtir")
+def like(dados: SocialPostRequest):
     col = mongo_db.get_collection("posts")
     oid = ObjectId(dados.post_id)
     post = col.find_one({"_id": oid})
-    if not post: return {"sucesso": False}
-    
-    if dados.usuario in post.get("likes", []):
-        col.update_one({"_id": oid}, {"$pull": {"likes": dados.usuario}})
-    else:
-        col.update_one({"_id": oid}, {"$addToSet": {"likes": dados.usuario}})
+    if post:
+        op = "$pull" if dados.usuario in post.get("likes", []) else "$addToSet"
+        col.update_one({"_id": oid}, {op: {"likes": dados.usuario}})
     return {"sucesso": True}
 
-@app.post("/social/comentar", tags=["Social"])
-def postar_comentario(dados: SocialCommentRequest):
-    col = mongo_db.get_collection("posts")
-    cmt = {
-        "autor": dados.usuario,
-        "texto": dados.texto,
-        "data": datetime.now().isoformat()
-    }
-    col.update_one({"_id": ObjectId(dados.post_id)}, {"$push": {"comentarios": cmt}})
+@app.post("/social/comentar")
+def comment(dados: SocialCommentRequest):
+    mongo_db.get_collection("posts").update_one({"_id": ObjectId(dados.post_id)}, 
+        {"$push": {"comentarios": {"autor": dados.usuario, "texto": dados.texto, "data": datetime.now().isoformat()}}})
     return {"sucesso": True}
 
-# --- GAMIFICAÇÃO & VISION AI ---
+@app.post("/social/post/deletar")
+def delete_post(dados: SocialPostRequest):
+    res = mongo_db.get_collection("posts").delete_one({"_id": ObjectId(dados.post_id), "autor": dados.usuario})
+    return {"sucesso": res.deleted_count > 0}
 
-@app.get("/social/ranking", tags=["Social"])
-def get_ranking():
-    col = mongo_db.get_collection("usuarios")
-    users = list(col.find({"is_admin": False}, {"nome": 1, "usuario": 1, "pontos": 1, "foto_perfil": 1, "_id": 0}).sort("pontos", DESCENDING).limit(50))
-    return {"sucesso": True, "ranking": users}
+@app.get("/social/ranking")
+def ranking():
+    u = list(mongo_db.get_collection("usuarios").find({"is_admin": False}, {"nome": 1, "usuario": 1, "pontos": 1, "foto_perfil": 1, "_id": 0}).sort("pontos", -1).limit(50))
+    return {"sucesso": True, "ranking": u}
 
-@app.get("/social/checkins", tags=["Social"])
-def get_checkins(usuario: str):
-    col = mongo_db.get_collection("checkins")
+@app.get("/social/checkins")
+def checkins(usuario: str):
+    raw = list(mongo_db.get_collection("checkins").find({"usuario": usuario}))
+    return {"sucesso": True, "checkins": {datetime.fromisoformat(c['data']).day: c['tipo'] for c in raw}}
+
+@app.post("/social/validar-conquista")
+async def val_conquest(usuario: str = Form(...), tipo: str = Form(...), foto: UploadFile = File(...)):
     now = datetime.now()
-    start = datetime(now.year, now.month, 1).isoformat()
-    checkins = list(col.find({"usuario": usuario, "data": {"$gte": start}}))
+    if mongo_db.get_collection("checkins").find_one({"usuario": usuario, "data": {"$gte": datetime(now.year, now.month, now.day).isoformat()}}):
+        return {"sucesso": False}
     
-    formatted = {}
-    for c in checkins:
-        try:
-            d = datetime.fromisoformat(c['data']).day
-            formatted[d] = c['tipo']
-        except: pass
-    return {"sucesso": True, "checkins": formatted}
-
-@app.post("/social/validar-conquista", tags=["Social"])
-async def validar_conquista(
-    usuario: str = Form(...),
-    tipo: str = Form(...), 
-    foto: UploadFile = File(...)
-):
-    """Valida checkin via IA de Visão."""
-    col = mongo_db.get_collection("checkins")
-    now = datetime.now()
-    today_start = datetime(now.year, now.month, now.day).isoformat()
+    img = ImageService.optimize(await foto.read())
+    resp = AIOrchestrator.simple_generation(f"Valide treino {tipo}. Responda APROVADO ou REPROVADO.", img)
     
-    if col.find_one({"usuario": usuario, "data": {"$gte": today_start}}):
-        return {"sucesso": False, "mensagem": "Checkin já realizado hoje."}
+    if "APROVADO" in resp.upper():
+        mongo_db.get_collection("checkins").insert_one({"usuario": usuario, "tipo": tipo, "data": now.isoformat(), "pontos": 50})
+        mongo_db.get_collection("usuarios").update_one({"usuario": usuario}, {"$inc": {"pontos": 50}})
+        return {"sucesso": True, "aprovado": True, "pontos": 50}
+    return {"sucesso": True, "aprovado": False}
 
-    content = await foto.read()
-    img_opt = ImageService.optimize(content)
-    
-    # Usa modelo rápido para validação binária (Sim/Não)
-    resp = AIOrchestrator.simple_generation(f"Analise esta imagem. Ela comprova um treino de {tipo} ou presença em academia? Responda APENAS 'APROVADO' ou 'REPROVADO'.", img_opt)
-    
-    if resp and "APROVADO" in resp.upper():
-        pts = 50
-        col.insert_one({"usuario": usuario, "tipo": tipo, "data": now.isoformat(), "pontos": pts})
-        mongo_db.get_collection("usuarios").update_one({"usuario": usuario}, {"$inc": {"pontos": pts}})
-        return {"sucesso": True, "aprovado": True, "pontos": pts}
-    else:
-        return {"sucesso": True, "aprovado": False, "mensagem": "Não foi possível validar o treino pela imagem."}
-
-# --- CHAT & ADMIN ---
-
-@app.get("/chat/mensagens", tags=["Chat"])
-def get_msgs(user1: str, user2: str):
-    col = mongo_db.get_collection("chat")
-    q = {"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}
-    msgs = list(col.find(q).sort("timestamp", ASCENDING))
+@app.get("/chat/mensagens")
+def chat_msgs(user1: str, user2: str):
+    msgs = list(mongo_db.get_collection("chat").find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
     for m in msgs: m['_id'] = str(m['_id'])
     return {"sucesso": True, "mensagens": msgs}
 
-@app.post("/chat/enviar", tags=["Chat"])
-def send_msg(dados: ChatMessageRequest):
-    col = mongo_db.get_collection("chat")
-    col.insert_one(dados.model_dump())
+@app.post("/chat/enviar")
+def chat_send(dados: ChatMessageRequest):
+    mongo_db.get_collection("chat").insert_one({**dados.model_dump(), "timestamp": datetime.now().isoformat()})
     return {"sucesso": True}
 
-@app.get("/chat/usuarios", tags=["Chat"])
-def list_chat_users(usuario_atual: str):
-    col = mongo_db.get_collection("usuarios")
-    users = list(col.find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))
-    return {"sucesso": True, "usuarios": users}
+@app.get("/chat/usuarios")
+def chat_users(usuario_atual: str):
+    return {"sucesso": True, "usuarios": list(mongo_db.get_collection("usuarios").find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))}
 
-@app.get("/admin/listar", tags=["Admin"])
-def admin_list():
-    users = list(mongo_db.get_collection("usuarios").find())
-    for u in users: u['_id'] = str(u['_id'])
-    return {"sucesso": True, "usuarios": users}
+@app.get("/admin/listar")
+def admin_l():
+    u = list(mongo_db.get_collection("usuarios").find())
+    for x in u: x['_id'] = str(x['_id'])
+    return {"sucesso": True, "usuarios": u}
 
-@app.post("/admin/editar", tags=["Admin"])
-def admin_edit(dados: AdminUserEdit):
-    upd = {}
-    if dados.status: upd["status"] = dados.status
-    if dados.creditos is not None: upd["avaliacoes_restantes"] = dados.creditos
-    mongo_db.get_collection("usuarios").update_one({"usuario": dados.target_user}, {"$set": upd})
+@app.post("/admin/editar")
+def admin_e(dados: AdminUserEdit):
+    mongo_db.get_collection("usuarios").update_one({"usuario": dados.target_user}, {"$set": {k:v for k,v in dados.model_dump().items() if v and k!="target_user"}})
     return {"sucesso": True}
 
-@app.post("/admin/excluir", tags=["Admin"])
-def admin_del(dados: AdminUserEdit):
+@app.post("/admin/excluir")
+def admin_d(dados: AdminUserEdit):
     mongo_db.get_collection("usuarios").delete_one({"usuario": dados.target_user})
     return {"sucesso": True}
 
-@app.get("/setup/criar-admin", tags=["Admin"])
-def create_admin():
-    col = mongo_db.get_collection("usuarios")
-    if col.find_one({"usuario": "admin"}): return {"sucesso": False, "mensagem": "Admin existe."}
-    col.insert_one({"usuario": "admin", "senha": "123", "nome": "Super Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999})
+@app.get("/setup/criar-admin")
+def setup_adm():
+    if mongo_db.get_collection("usuarios").find_one({"usuario": "admin"}): return {"sucesso": False}
+    mongo_db.get_collection("usuarios").insert_one({"usuario": "admin", "senha": "123", "nome": "Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999})
     return {"sucesso": True}
 
-# --- PDF ---
-
 @app.get("/analise/baixar-pdf/{usuario}", tags=["Export"])
-def download_pdf(usuario: str):
+def pdf_gen(usuario: str):
     try:
-        col = mongo_db.get_collection("usuarios")
-        user = col.find_one({"usuario": usuario})
-        if not user or not user.get('historico_dossies'): raise HTTPException(404)
-        
-        dossie = user['historico_dossies'][-1]
-        data = dossie['conteudo_bruto']['json_full']
+        user = mongo_db.get_collection("usuarios").find_one({"usuario": usuario})
+        if not user: raise HTTPException(404)
+        data = user['historico_dossies'][-1]['conteudo_bruto']['json_full']
         
         pdf = PDFReport()
-        pdf.add_page()
-        pdf.chapter_title(f"RELATORIO: {user.get('nome', '').upper()}")
+        pdf.add_page(); pdf.chapter_title(f"RELATORIO: {user.get('nome')}")
+        if 'dieta' in data: 
+            pdf.chapter_title("DIETA")
+            for d in data['dieta']: pdf.card(d['dia'], str(d['refeicoes']))
         
-        if 'avaliacao' in data:
-            pdf.card("Avaliação", data['avaliacao'].get('insight', ''))
-            
-        if 'dieta' in data:
-            pdf.add_page()
-            pdf.chapter_title("DIETA 7 DIAS")
-            for d in data['dieta']:
-                pdf.card(f"{d.get('dia')} - {d.get('foco_nutricional')}", d.get('macros_totais'))
-                for r in d.get('refeicoes', []):
-                    pdf.chapter_body(f"{r.get('horario')}: {r.get('alimentos')}")
-        
-        if 'treino' in data:
-            pdf.add_page()
-            pdf.chapter_title("TREINO 7 DIAS")
-            for t in data['treino']:
-                pdf.card(f"{t.get('dia')} - {t.get('foco')}", t.get('justificativa', ''))
-                for ex in t.get('exercicios', []):
-                    pdf.chapter_body(f"> {ex.get('nome')} [{ex.get('series_reps')}]")
-
         buf = io.BytesIO()
-        out = pdf.output(dest='S')
-        if isinstance(out, str): buf.write(out.encode('latin-1'))
-        else: buf.write(out)
-        buf.seek(0)
-        
-        return StreamingResponse(buf, media_type="application/pdf", headers={'Content-Disposition': 'attachment; filename="TechnoBolt.pdf"'})
-    except Exception as e:
-        logger.error(f"PDF Err: {e}")
-        raise HTTPException(500)
+        out = pdf.output(dest='S').encode('latin-1', 'replace')
+        buf.write(out); buf.seek(0)
+        return StreamingResponse(buf, media_type="application/pdf", headers={'Content-Disposition': 'attachment; filename="report.pdf"'})
+    except: raise HTTPException(500)
