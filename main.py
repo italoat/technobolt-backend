@@ -219,10 +219,6 @@ class Settings:
             "models/gemini-flash-latest"      # Quaternary: Last Resort
         ]
         
-        self.AI_STRUCTURE_MODELS = [
-            "models/gemini-flash-latest"
-        ]
-        
         logger.info(f"🧠 AI Priority Chain Loaded: {len(self.AI_MODELS_PRIORITY)} models active.")
 
     def _get_env(self, key: str, default: Any = None, critical: bool = False) -> str:
@@ -894,7 +890,7 @@ class AIOrchestrator:
                 # --- PHASE 1: REASONING (The Brain) ---
                 logger.info(f"🧠 [Phase 1 - Reasoning] Running on {model}...")
                 
-                # UPDATE 1: Enhanced Physical Assessment & Caloric Surplus Logic
+                # UPDATE 1: Expert Persona, Volume Elevation & Detailed Justification
                 prompt_p1 = context_prompt + """
                 \n\nCRITICAL INSTRUCTION: Act as a PhD SPORTS SCIENTIST with 20+ years of specialization in Hypertrophy and Strength.
                 Generate a HIGHLY DETAILED, VERBOSE text strategy. Do not output JSON yet.
