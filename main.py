@@ -1,6 +1,6 @@
 """
-TechnoBolt Gym Hub API - Enterprise Edition (Titanium-FullStack)
-Version: 110.0-Titanium-Final-R
+TechnoBolt Gym Hub API - Enterprise Edition (Titanium-Restore & Fix)
+Version: 112.0-Stabilized
 Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline & Multi-Level Rotation
 Copyright (c) 2026 TechnoBolt Solutions.
 """
@@ -30,7 +30,6 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
 from fastapi.security import APIKeyHeader
-from fastapi.exceptions import RequestValidationError
 
 # --- VALIDAÇÃO DE DADOS ---
 from pydantic import BaseModel, Field, BeforeValidator, ConfigDict, validator, field_validator, HttpUrl
@@ -43,11 +42,11 @@ from pymongo.errors import (
     PyMongoError, 
     ServerSelectionTimeoutError, 
     NetworkTimeout, 
-    DuplicateKeyError,
+    DuplicateKeyError, 
     OperationFailure
 )
 
-# --- IA E IMAGEM ---
+# --- IA E PROCESSAMENTO DE IMAGEM ---
 import google.generativeai as genai
 from google.api_core import exceptions as google_exceptions
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
@@ -58,78 +57,58 @@ import pillow_heif
 from fpdf import FPDF
 
 # ==============================================================================
-# SEÇÃO 1: CONFIGURAÇÃO DE LOGGING AVANÇADO
+# SEÇÃO 1: CONFIGURAÇÃO DE LOGGING & MONITORAMENTO
 # ==============================================================================
 
 class EnterpriseLogger:
     """
-    Configuração de Logging estruturado para monitoramento em produção de alta escala.
-    Implementa rotação de logs, formatação padrão ISO-8601 e separação de streams.
+    Configura um sistema de logging estruturado capaz de rastrear transações
+    e erros críticos em ambiente de produção.
     """
-    
     @staticmethod
     def setup() -> logging.Logger:
         logger = logging.getLogger("TechnoBoltAPI")
         logger.setLevel(logging.INFO)
         
-        # Remove handlers existentes para evitar duplicação em reloads do Uvicorn
+        # Evita duplicação de handlers no reload do uvicorn
         if logger.hasHandlers():
             logger.handlers.clear()
             
-        # Handler de Console (Stdout) com formatação rica
-        console_handler = logging.StreamHandler()
+        handler = logging.StreamHandler()
+        # Formato rico com timestamp, nível, módulo e linha
         formatter = logging.Formatter(
-            fmt='%(asctime)s | %(levelname)-8s | %(name)s | %(module)s:%(funcName)s:%(lineno)d | %(message)s',
+            fmt='%(asctime)s | %(levelname)-8s | [%(name)s] %(module)s:%(funcName)s:%(lineno)d | %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-        
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
         return logger
 
 logger = EnterpriseLogger.setup()
 
 # ==============================================================================
-# SEÇÃO 2: INICIALIZAÇÃO DE SUPORTE E DRIVERS DE IMAGEM
+# SEÇÃO 2: INICIALIZAÇÃO DE SUPORTE A FORMATOS
 # ==============================================================================
 
-def initialize_image_drivers():
-    """
-    Inicializa drivers de imagem com fail-safe e suporte cross-platform.
-    Garante suporte a formatos Apple (HEIC) para uploads mobile.
-    """
-    try:
-        pillow_heif.register_heif_opener()
-        logger.info("✅ Suporte a HEIC/HEIF inicializado com sucesso (iOS Support Ready).")
-    except ImportError:
-        logger.warning("⚠️ Biblioteca pillow_heif não instalada. Suporte iOS desativado.")
-    except Exception as e:
-        logger.warning(f"⚠️ Falha ao inicializar suporte HEIC: {e}. Imagens de iPhone podem falhar.")
-
-initialize_image_drivers()
+try:
+    pillow_heif.register_heif_opener()
+    logger.info("✅ Codec HEIC/HEIF registrado com sucesso (Suporte iOS ativado).")
+except Exception as e:
+    logger.warning(f"⚠️ Falha ao registrar codec HEIC. Uploads de iPhone podem falhar: {e}")
 
 # ==============================================================================
-# SEÇÃO 3: GERENCIAMENTO DE CONFIGURAÇÃO E AMBIENTE (SINGLETON)
+# SEÇÃO 3: GERENCIAMENTO DE CONFIGURAÇÃO (ENVIRONMENT)
 # ==============================================================================
 
 class Settings:
     """
-    Gerenciador de Configurações Singleton.
-    Valida e carrega variáveis de ambiente críticas na inicialização.
-    Mantém a integridade dos motores de IA definidos pelo usuário.
+    Singleton para gerenciamento de configurações sensíveis e variáveis de ambiente.
+    Realiza validação no startup para garantir integridade.
     """
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(Settings, cls).__new__(cls)
-            cls._instance._load()
-        return cls._instance
-
-    def _load(self):
-        logger.info("⚙️ Carregando configurações do ambiente e definindo estratégias...")
+    def __init__(self):
+        logger.info("⚙️  Carregando configurações do sistema...")
         
-        # Banco de Dados
+        # Credenciais de Banco de Dados
         self.MONGO_USER = self._get_env("MONGO_USER", "technobolt")
         self.MONGO_PASS = self._get_env("MONGO_PASS", "tech@132")
         self.MONGO_HOST = self._get_env("MONGO_HOST", "cluster0.zbjsvk6.mongodb.net")
@@ -137,62 +116,58 @@ class Settings:
         
         # Metadados da API
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "110.0-Titanium-Full"
-        self.ENV = self._get_env("ENV", "production")
+        self.API_VERSION = "112.0-Titanium-Fixed"
         
-        # Carregamento dinâmico de chaves de API (Load Balancer)
+        # Carregamento do Pool de Chaves de IA
         self.GEMINI_KEYS = self._load_api_keys()
         
         # ======================================================================
-        # DEFINIÇÃO DE MOTORES (ESTRITAMENTE CONFORME SOLICITADO PELO USUÁRIO)
+        # DEFINIÇÃO DE MOTORES (RESTAURADOS CONFORME SOLICITAÇÃO)
         # ======================================================================
         
-        # Brain (Raciocínio): Prioriza inteligência e contexto
+        # Brain Models: Raciocínio profundo e estratégia
         self.REASONING_MODELS = [
-            "models/gemini-3-flash-preview",  # Motor Principal (Bleeding Edge)
-            "models/gemini-2.5-flash",        # Fallback Secundário
-            "models/gemini-2.0-flash"         # Fallback Terciário
+            "models/gemini-3-flash-preview", 
+            "models/gemini-2.5-flash", 
+            "models/gemini-2.0-flash"
         ]
         
-        # Formatter (Estruturação): Focados em JSON válido
+        # Structuring Models: Velocidade e formatação JSON
         self.STRUCTURING_MODELS = [
-            "models/gemini-flash-latest"      # Motor Rápido
+            "models/gemini-flash-latest"
         ]
         
-        logger.info(f"🧠 Motores de Raciocínio Ativos: {self.REASONING_MODELS}")
-        logger.info(f"⚡ Motores de Estruturação Ativos: {self.STRUCTURING_MODELS}")
+        logger.info(f"🧠 Motores de Raciocínio: {self.REASONING_MODELS}")
+        logger.info(f"⚡ Motores de Estruturação: {self.STRUCTURING_MODELS}")
 
     def _get_env(self, key: str, default: Any = None) -> str:
         value = os.environ.get(key, default)
         if value is None:
-            logger.warning(f"⚠️ Variável de ambiente {key} não definida. Usando default: {default}")
+            logger.warning(f"⚠️ Variável de ambiente crítica ausente: {key}")
         return value
 
     def _load_api_keys(self) -> List[str]:
+        """Carrega até 20 chaves de API para balanceamento de carga."""
         keys = []
-        # Varre até 20 slots de chaves para garantir redundância e escalabilidade horizontal
         for i in range(1, 21):
             key_val = os.environ.get(f"GEMINI_CHAVE_{i}")
             if key_val and len(key_val.strip()) > 10:
                 keys.append(key_val.strip())
         
         if not keys:
-            logger.critical("❌ ERRO CRÍTICO: Nenhuma chave de API (GEMINI_CHAVE_x) encontrada!")
-            # Em produção, poderíamos levantar erro, mas aqui logamos o alerta
+            logger.critical("❌ ERRO CRÍTICO: Nenhuma GEMINI_CHAVE encontrada! O sistema de IA falhará.")
         else:
-            logger.info(f"🔑 {len(keys)} chaves de API do Gemini carregadas no pool.")
+            logger.info(f"🔑 Pool de IA carregado: {len(keys)} chaves disponíveis.")
         
         return keys
 
-# Instância global de configurações
 settings = Settings()
 
 # ==============================================================================
-# SEÇÃO 4: EXCEÇÕES CUSTOMIZADAS E TRATAMENTO DE ERROS
+# 4. TRATAMENTO DE ERROS E EXCEÇÕES CUSTOMIZADAS
 # ==============================================================================
 
 class BaseAPIException(Exception):
-    """Classe base para erros da API com status code associado e detalhes contextuais."""
     def __init__(self, message: str, status_code: int = 500, details: Any = None):
         self.message = message
         self.status_code = status_code
@@ -201,74 +176,58 @@ class BaseAPIException(Exception):
 
 class DatabaseConnectionError(BaseAPIException):
     def __init__(self, details: str):
-        super().__init__("Erro de conexão com o banco de dados.", 503, details)
+        super().__init__("Serviço de banco de dados indisponível.", 503, details)
 
-class AIProcessingError(BaseAPIException):
+class AIReasoningError(BaseAPIException):
     def __init__(self, details: str):
-        super().__init__("Erro no processamento cognitivo da IA.", 503, details)
+        super().__init__("O Cérebro da IA falhou em gerar uma estratégia válida.", 502, details)
 
 class AIStructuringError(BaseAPIException):
     def __init__(self, details: str):
-        super().__init__("Erro na estruturação do JSON. O modelo não seguiu o esquema estrito.", 500, details)
+        super().__init__("A IA falhou em estruturar os dados (Erro de JSON).", 502, details)
 
 class ResourceNotFoundError(BaseAPIException):
     def __init__(self, resource: str):
         super().__init__(f"{resource} não encontrado.", 404)
 
-class ValidationBusinessError(BaseAPIException):
-    def __init__(self, message: str):
-        super().__init__(message, 400)
-
 # ==============================================================================
-# SEÇÃO 5: DECORATORS E MIDDLEWARE DE MONITORAMENTO
+# 5. DECORATORS E MIDDLEWARE DE PERFORMANCE
 # ==============================================================================
 
 def measure_time(func):
-    """
-    Decorator para medir tempo de execução de funções assíncronas.
-    Essencial para monitorar latência dos modelos de IA e gargalos de I/O.
-    """
+    """Mede o tempo de execução de funções assíncronas (Rotas)."""
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
-        start = time.perf_counter()
-        func_name = func.__name__
-        request_id = str(random.randint(1000, 9999)) # ID simples para trace local
-        logger.info(f"⏳ [{request_id}] Iniciando execução de {func_name}...")
+        start_time = time.perf_counter()
         try:
-            result = await func(*args, **kwargs)
-            return result
-        except Exception as e:
-            elapsed = (time.perf_counter() - start) * 1000
-            logger.error(f"❌ [{request_id}] {func_name} falhou após {elapsed:.2f}ms. Erro: {str(e)}")
-            raise e
+            return await func(*args, **kwargs)
         finally:
-            elapsed = (time.perf_counter() - start) * 1000
-            logger.info(f"⏱️  [{request_id}] {func_name} finalizado em {elapsed:.2f}ms")
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.info(f"⏱️  [{func.__name__}] concluído em {elapsed:.2f}ms")
     return wrapper
 
 def sync_measure_time(func):
-    """Decorator para medir tempo de execução de funções síncronas."""
+    """Mede o tempo de execução de funções síncronas."""
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        start = time.perf_counter()
-        func_name = func.__name__
+        start_time = time.perf_counter()
         try:
             return func(*args, **kwargs)
         finally:
-            elapsed = (time.perf_counter() - start) * 1000
-            logger.info(f"⏱️  {func_name} executado em {elapsed:.2f}ms")
+            elapsed = (time.perf_counter() - start_time) * 1000
+            logger.info(f"⏱️  [{func.__name__}] concluído em {elapsed:.2f}ms")
     return wrapper
 
 # ==============================================================================
-# SEÇÃO 6: CAMADA DE PERSISTÊNCIA (MONGODB) - ROBUSTA
+# 6. CAMADA DE DADOS: GERENCIADOR MONGODB
 # ==============================================================================
 
 PyObjectId = Annotated[str, BeforeValidator(str)]
 
 class MongoManager:
     """
-    Gerenciador de Conexão MongoDB com padrão Singleton e Reconexão Automática.
-    Implementa pool de conexões otimizado para alta concorrência.
+    Gerenciador de Banco de Dados com Padrão Singleton.
+    Garante uma única conexão global e gerencia reconexões automáticas.
     """
     _instance = None
     client: MongoClient = None
@@ -281,50 +240,58 @@ class MongoManager:
         return cls._instance
 
     def _initialize(self):
-        """Inicializa a conexão com parâmetros de tuning para produção."""
         try:
-            logger.info("🔌 Inicializando driver MongoDB com Pool Tuning...")
+            logger.info("🔌 Inicializando driver MongoDB...")
             password = urllib.parse.quote_plus(settings.MONGO_PASS)
             uri = f"mongodb+srv://{settings.MONGO_USER}:{password}@{settings.MONGO_HOST}/?appName=Cluster0"
             
+            # Configurações de timeout agressivas para falhar rápido
             self.client = MongoClient(
                 uri,
-                serverSelectionTimeoutMS=5000, # 5s timeout para seleção de servidor
-                connectTimeoutMS=10000,        # 10s timeout de conexão
-                socketTimeoutMS=10000,         # 10s timeout de socket
-                maxPoolSize=100,               # Pool de conexões para alta concorrência
-                minPoolSize=10,                # Mantém conexões quentes
+                serverSelectionTimeoutMS=5000,
+                connectTimeoutMS=10000,
+                socketTimeoutMS=10000,
+                maxPoolSize=100,
+                minPoolSize=10,
                 retryWrites=True
             )
             
-            # Fail-fast check
+            # Health check inicial
             self.client.admin.command('ping')
             self.db = self.client[settings.DB_NAME]
-            logger.info(f"✅ Conexão MongoDB estabelecida com sucesso: {settings.DB_NAME}")
+            logger.info(f"✅ Conexão MongoDB estabelecida: {settings.DB_NAME}")
+            
+            self._ensure_indexes()
             
         except Exception as e:
-            logger.critical(f"❌ Falha fatal na conexão MongoDB: {e}")
-            # Em um cenário real, poderíamos lançar um SystemExit aqui
+            logger.critical(f"❌ Falha fatal ao conectar no MongoDB: {e}")
+
+    def _ensure_indexes(self):
+        """Cria índices para performance crítica."""
+        try:
+            if self.db is not None:
+                self.db.usuarios.create_index("usuario", unique=True)
+                self.db.posts.create_index([("data", DESCENDING)])
+                self.db.checkins.create_index([("usuario", ASCENDING), ("data", DESCENDING)])
+        except Exception as e:
+            logger.warning(f"⚠️ Aviso de índice: {e}")
 
     def get_collection(self, collection_name: str):
-        """
-        Retorna uma coleção, verificando a saúde da conexão.
-        Implementa lógica de retry simples na obtenção do handle.
-        """
+        """Obtém uma coleção garantindo que a conexão está ativa."""
         if self.client is None or self.db is None:
-            logger.warning("🔄 Conexão perdida. Tentando reconexão com MongoDB...")
+            logger.warning("🔄 Tentando reconexão com o banco...")
             self._initialize()
             
         if self.db is None:
-             raise DatabaseConnectionError("Banco de dados indisponível após tentativa de reconexão.")
+             raise DatabaseConnectionError("Serviço de banco de dados indisponível.")
              
         return self.db[collection_name]
 
-# Instância global do banco
+# Instância Global
 mongo_db = MongoManager()
 
 # ==============================================================================
-# SEÇÃO 7: MODELOS DE DADOS (SCHEMAS PYDANTIC STRICT)
+# 7. MODELOS DE DADOS (PYDANTIC SCHEMAS)
 # ==============================================================================
 
 class MongoBaseModel(BaseModel):
@@ -332,21 +299,21 @@ class MongoBaseModel(BaseModel):
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
     
     model_config = ConfigDict(
-        populate_by_name=True,
-        arbitrary_types_allowed=True,
+        populate_by_name=True, 
+        arbitrary_types_allowed=True, 
         json_encoders={ObjectId: str, datetime: lambda v: v.isoformat()}
     )
 
 class UserLogin(BaseModel):
-    usuario: str = Field(..., min_length=3, description="Login único do usuário")
-    senha: str = Field(..., min_length=3, description="Senha do usuário")
+    usuario: str = Field(..., min_length=3)
+    senha: str = Field(..., min_length=3)
 
 class UserRegister(BaseModel):
-    usuario: str = Field(..., min_length=3, max_length=50)
+    usuario: str = Field(..., min_length=3)
     senha: str = Field(..., min_length=3)
     nome: str = Field(..., min_length=2)
-    peso: float = Field(..., gt=0, lt=500, description="Peso em kg")
-    altura: float = Field(..., gt=0, lt=300, description="Altura em cm")
+    peso: float = Field(..., gt=0, lt=500)
+    altura: float = Field(..., gt=0, lt=300)
     genero: str = Field(..., pattern="^(Masculino|Feminino|Outro)$")
 
 class UserUpdate(BaseModel):
@@ -381,15 +348,11 @@ class AdminUserEdit(BaseModel):
     creditos: Optional[int] = None
 
 # ==============================================================================
-# SEÇÃO 8: REPOSITÓRIO DE EXERCÍCIOS (CACHE & BLINDAGEM DE CONTEXTO)
+# 8. REPOSITÓRIO DE EXERCÍCIOS (CACHE)
 # ==============================================================================
 
 class ExerciseRepository:
-    """
-    Gerencia o carregamento e consulta do banco de exercícios local.
-    Implementa Singleton para manter cache em memória e evitar I/O repetitivo.
-    BLINDAGEM RESTAURADA: Injeta TODOS os exercícios no contexto para garantir precisão exata.
-    """
+    """Gerencia o cache em memória dos exercícios para validação e prompts."""
     _db: Dict[str, str] = {}
     _keys_string: str = ""
     
@@ -398,155 +361,133 @@ class ExerciseRepository:
         try:
             path = "exercises.json"
             if not os.path.exists(path):
-                # Cria um mock básico se não existir para não quebrar a lógica de validação
-                cls._db = {"supino reto": "chest/bench_press", "agachamento": "legs/squat"}
-                logger.warning("⚠️ Arquivo exercises.json não encontrado. Usando mock básico de fallback.")
-            else:
-                with open(path, "r", encoding="utf-8") as f:
-                    cls._db = json.load(f)
-            
-            # --- BLINDAGEM RESTAURADA ---
-            # Removemos o limite [:300]. Agora a IA recebe a lista completa (ou até o limite do token).
+                logger.warning("⚠️ exercises.json não encontrado. Validação desabilitada.")
+                return
+
+            with open(path, "r", encoding="utf-8") as f:
+                cls._db = json.load(f)
+                
             all_keys = list(cls._db.keys())
-            cls._keys_string = ", ".join(all_keys) 
-            
-            logger.info(f"✅ ExerciseRepository: {len(cls._db)} exercícios carregados (Blindagem Total Ativa).")
-            
-        except json.JSONDecodeError:
-            logger.error("❌ Erro de sintaxe no arquivo exercises.json")
-            cls._db = {}
+            # Limita a lista para não estourar o contexto da IA (Top 600)
+            cls._keys_string = ", ".join(all_keys[:600]) 
+            logger.info(f"✅ ExerciseRepository carregado: {len(cls._db)} itens.")
         except Exception as e:
-            logger.error(f"❌ Erro crítico ao carregar exercises.json: {e}")
-            cls._db = {}
+            logger.error(f"❌ Erro crítico no ExerciseRepository: {e}")
 
     @classmethod
     def get_keys_string(cls) -> str:
-        """Retorna a string completa para injeção no prompt (Blindagem)."""
         return cls._keys_string
 
     @classmethod
     def get_db(cls) -> Dict[str, str]:
-        """Retorna o dicionário completo para validação pós-IA."""
         return cls._db
 
-# Carrega no startup da aplicação
 ExerciseRepository.load()
 
 # ==============================================================================
-# SEÇÃO 9: SISTEMA DE ROTATIVIDADE DE CHAVES (API KEY MANAGER)
+# 9. SERVIÇOS DE IA: KEY MANAGER
 # ==============================================================================
 
 class KeyRotationManager:
     """
-    Gerencia o pool de chaves de API, implementando lógica de Round-Robin
-    e Cooldown temporário para chaves que atingem o Rate Limit (429).
+    Gerencia o pool de chaves de API com lógica de Round-Robin e Cooldown.
+    Evita erros 429 (Rate Limit) rotacionando chaves automaticamente.
     """
     def __init__(self, keys: List[str]):
         self.keys = keys
-        self.cooldowns: Dict[str, float] = {} # Armazena timestamp de liberação
+        self.cooldowns: Dict[str, float] = {} 
         self.COOLDOWN_SECONDS = 60.0
 
     def get_available_keys(self) -> List[str]:
-        """Retorna lista de chaves que não estão em cooldown."""
+        """Retorna chaves que não estão em cooldown."""
         now = time.time()
-        # Limpa cooldowns expirados
+        # Remove chaves que já passaram do tempo de espera
         self.cooldowns = {k: v for k, v in self.cooldowns.items() if v > now}
         
         available = [k for k in self.keys if k not in self.cooldowns]
         
-        # Se não houver chaves, tenta usar todas (modo desespero para não falhar a req)
+        # Se todas estiverem bloqueadas, retorna a lista completa (Fail-Open strategy)
         if not available and self.keys:
             logger.warning("⚠️ Todas as chaves em cooldown. Forçando uso do pool completo.")
             return self.keys
             
-        # Embaralha para balanceamento de carga estatístico (Evita hot-spots)
-        random.shuffle(available)
+        random.shuffle(available) # Balanceamento estocástico
         return available
 
     def report_rate_limit(self, key: str):
-        """Marca uma chave como 'esgotada' temporariamente."""
+        """Bloqueia uma chave temporariamente."""
         logger.warning(f"⚠️ Rate Limit atingido na chave ...{key[-4:]}. Pausando por {self.COOLDOWN_SECONDS}s.")
         self.cooldowns[key] = time.time() + self.COOLDOWN_SECONDS
 
 key_manager = KeyRotationManager(settings.GEMINI_KEYS)
 
 # ==============================================================================
-# SEÇÃO 10: SERVIÇOS DE IA - LÓGICA CORE (CHAIN OF THOUGHT)
+# 10. SERVIÇOS DE IA: CORE LOGIC & CHAIN OF THOUGHT
 # ==============================================================================
 
 class JSONRepairKit:
     """
     Ferramentas avançadas para reparo de strings JSON malformadas.
-    Resolve problemas de sintaxe comuns em LLMs (Trailing commas, Markdown blocks).
+    Resolve o erro 'Expecting , delimiter' inserindo vírgulas faltantes.
     """
+    
     @staticmethod
-    def extract_json_block(text: str) -> str:
-        """Tenta encontrar o bloco JSON principal usando Regex."""
-        # Procura pelo padrão { ... } abrangendo multiplas linhas
-        match = re.search(r'(\{.*\})', text, re.DOTALL)
-        if match:
-            return match.group(1)
-        return text
-
-    @staticmethod
-    def fix_syntax(text: str) -> str:
-        """Corrige erros sintáticos comuns gerados por LLMs."""
-        text = text.strip()
-        
-        # Remove blocos Markdown
-        if "```" in text:
-            text = re.sub(r'```json|```', '', text).strip()
-            
-        # Remove comentários estilo C/JS (ilegais em JSON)
-        text = re.sub(r'//.*?\n|/\*.*?\*/', '', text, flags=re.S)
-        
-        # Remove vírgulas trailing (Ex: {"a": 1,})
-        text = re.sub(r',(\s*[}\]])', r'\1', text)
-        
-        # --- NUCLEAR FIX para "Expecting ',' delimiter" ---
-        # A regex abaixo encontra um fechamento de objeto '}' ou array ']', 
-        # seguido opcionalmente de espaço em branco, e depois uma abertura '{' ou '['.
-        # Insere a vírgula faltante.
-        text = re.sub(r'([}\]])\s*([{\[])', r'\1,\2', text)
-        
-        # Corrige aspas faltando após fechamento (Ex: "valor" } "chave")
-        text = re.sub(r'([}\]])\s*"', r'\1,"', text) 
-        
-        # Tentativa de balanceamento de chaves (JSON Truncado)
-        open_braces = text.count('{')
-        close_braces = text.count('}')
-        if open_braces > close_braces:
-            text += '}' * (open_braces - close_braces)
-            
-        open_brackets = text.count('[')
-        close_brackets = text.count(']')
-        if open_brackets > close_brackets:
-            text += ']' * (open_brackets - close_brackets)
-            
-        return text
-
-    @classmethod
-    def parse_robust(cls, text_ia: str) -> Dict:
-        """Pipeline de tentativa de parseamento em cascata."""
-        # 1. Tentativa Direta
+    def fix_json_string(text: str) -> str:
         try:
-            return json.loads(text_ia)
+            text = text.strip()
+            # Remove blocos markdown
+            if "```" in text:
+                text = re.sub(r'```json|```', '', text).strip()
+            
+            # Remove comentários estilo C/JS
+            text = re.sub(r'//.*?\n|/\*.*?\*/', '', text, flags=re.S)
+            
+            # Remove vírgulas trailing (erro comum)
+            text = re.sub(r',(\s*[}\]])', r'\1', text)
+            
+            # --- FIX NUCLEAR PARA ERRO DE VÍRGULA FALTANDO ---
+            # Caso 1: Entre objetos/arrays (ex: } {)
+            text = re.sub(r'([}\]])\s*([{\[])', r'\1,\2', text)
+            
+            # Caso 2: Entre valor e chave (ex: "valor" "chave")
+            # Procura aspas, espaço, e novas aspas, exceto se tiver : no meio
+            text = re.sub(r'("\s*)\s+"', r'\1,"', text)
+            
+            # Caso 3: Entre número e chave (ex: 123 "chave")
+            text = re.sub(r'(\d+)\s+"', r'\1,"', text)
+
+            # Balanceamento de chaves
+            open_braces = text.count('{')
+            close_braces = text.count('}')
+            if open_braces > close_braces: text += '}' * (open_braces - close_braces)
+                
+            open_brackets = text.count('[')
+            close_brackets = text.count(']')
+            if open_brackets > close_brackets: text += ']' * (open_brackets - close_brackets)
+                
+            return text
+        except: return text
+
+    @staticmethod
+    def safe_parse(text: str) -> Dict:
+        """Pipeline de tentativa de parseamento robusto."""
+        # 1. Tentativa Direta
+        try: return json.loads(text)
         except: pass
         
         # 2. Extração de Bloco Regex
-        extracted = cls.extract_json_block(text_ia)
         try:
-            return json.loads(extracted)
+            match = re.search(r'(\{.*\})', text, re.DOTALL)
+            if match: return json.loads(match.group(1))
         except: pass
-        
-        # 3. Reparo Agressivo de Sintaxe
-        fixed = cls.fix_syntax(extracted)
+            
+        # 3. Reparo Agressivo
         try:
-            return json.loads(fixed)
+            repaired = JSONRepairKit.fix_json_string(text)
+            return json.loads(repaired)
         except json.JSONDecodeError as e:
-            logger.error(f"❌ JSON Irreparável. Erro: {e}")
-            logger.debug(f"Snippet do JSON falho: {text_ia[:500]}...")
-            raise AIStructuringError("Falha na estruturação do JSON pela IA após todas as tentativas de reparo.")
+            logger.error(f"❌ JSON Parse Falhou. Texto: {text[:100]}...")
+            raise AIStructuringError("Falha crítica na formatação do JSON.")
 
 class AIOrchestrator:
     """
@@ -558,8 +499,7 @@ class AIOrchestrator:
     def _call_gemini_with_retry(model_name: str, prompt: str, image_bytes: Optional[bytes] = None, 
                               json_mode: bool = False, temperature: float = 0.7) -> str:
         """
-        NÚCLEO DO RODÍZIO:
-        Tenta TODAS as chaves disponíveis para o modelo especificado.
+        NÚCLEO DO RODÍZIO: Tenta TODAS as chaves disponíveis para o modelo.
         """
         keys = key_manager.get_available_keys()
         if not keys:
@@ -573,10 +513,9 @@ class AIOrchestrator:
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel(model_name)
                 
-                # Configuração dinâmica baseada no modo
                 config = genai.types.GenerationConfig(
                     response_mime_type="application/json" if json_mode else "text/plain",
-                    max_output_tokens=8192, # Contexto aumentado
+                    max_output_tokens=8192,
                     temperature=temperature
                 )
                 
@@ -593,7 +532,7 @@ class AIOrchestrator:
                 
             except Exception as e:
                 err_str = str(e)
-                # Verifica se é erro de cota (429)
+                # Verifica se é erro de cota
                 if "429" in err_str or "Resource exhausted" in err_str:
                     key_manager.report_rate_limit(api_key)
                 
@@ -618,31 +557,31 @@ class AIOrchestrator:
         # --- FASE 1: RACIOCÍNIO (Brain) ---
         strategy_text = None
         
-        # Tenta cada modelo de raciocínio na ordem de preferência definida pelo usuário
+        # Tenta cada modelo de raciocínio na ordem de preferência
         for model in settings.REASONING_MODELS:
             try:
                 logger.info(f"🧠 [Fase 1 - Brain] Iniciando Raciocínio com {model}...")
                 
-                prompt_p1 = context_prompt + "\n\nINSTRUÇÃO CRÍTICA: Gere uma estratégia textual COMPLETA. Descreva TODOS os 7 dias de dieta e treino. NÃO RESUMA. Escreva dia por dia. Foque na qualidade técnica, bioquímica e biomecânica. Quero TEXTO detalhado, não JSON ainda."
+                prompt_p1 = context_prompt + "\n\nINSTRUÇÃO CRÍTICA: Gere uma estratégia textual DETALHADA. Não use JSON ainda. Foque na qualidade técnica. Seja VERBOSO."
                 
                 strategy_text = AIOrchestrator._call_gemini_with_retry(
                     model_name=model,
                     prompt=prompt_p1,
                     image_bytes=image_bytes,
                     json_mode=False,
-                    temperature=0.7 # Criatividade alta para estratégia
+                    temperature=0.7 
                 )
                 if strategy_text:
                     logger.info("🧠 [Fase 1] Estratégia gerada com sucesso.")
-                    break # Sucesso na fase 1
+                    break 
             except Exception as e:
                 logger.warning(f"⚠️ Modelo de raciocínio {model} esgotado. Tentando próximo...")
                 continue
         
         if not strategy_text:
-            # Fallback final: Tenta usar o modelo de estruturação para pensar (último recurso)
+            # Fallback final: Tenta usar o modelo de estruturação para pensar
             try:
-                logger.warning("⚠️ Todos modelos de raciocínio falharam. Usando fallback de formatação para pensar...")
+                logger.warning("⚠️ Todos modelos de raciocínio falharam. Usando fallback...")
                 strategy_text = AIOrchestrator._call_gemini_with_retry(
                     model_name=settings.STRUCTURING_MODELS[0],
                     prompt=context_prompt,
@@ -653,74 +592,57 @@ class AIOrchestrator:
                 raise AIProcessingError(f"Falha catastrófica na IA (Fase 1 - Brain): {e}")
 
         # --- FASE 2: ESTRUTURAÇÃO (Formatter) ---
+        logger.info("⚡ [Phase 2] Iniciando Estruturação JSON...")
+        
         exercise_list = ExerciseRepository.get_keys_string()
         
-        # Prompt de Formatação: Obriga a IA a preencher lacunas se a Fase 1 foi vaga
         prompt_p2 = f"""
-        TASK: You are a strict JSON Conversion Engine.
-        Convert the following Fitness Strategy into a VALID JSON format strictly following the schema below.
-        
-        SOURCE STRATEGY:
+        TASK: Convert this Strategy into VALID JSON.
+        STRATEGY:
         {strategy_text}
         
-        CRITICAL RULES (ANTI-LAZY PROTECTION):
-        1. OUTPUT ONLY JSON. No text before/after.
-        2. FULL 7 DAYS REQUIRED: Even if the source text says "Repeat Monday", YOU MUST GENERATE the full object for Tuesday, Wednesday, etc.
-        3. NO EMPTY ARRAYS: The 'dieta', 'treino', and 'suplementacao' arrays MUST contain data. If the source is vague, use your expert knowledge to fill in standard bodybuilding protocols for the user's goal.
-        4. EXERCISE MAPPING: Map exercises to this list if possible: [{exercise_list}]. If not found, use a logical name.
-        5. MINIMUM VOLUME: Ensure at least 8 exercises per workout session.
-        6. SYNTAX SAFETY: DOUBLE CHECK COMMAS between objects in arrays. Escape all quotes inside strings.
+        RULES:
+        1. Output ONLY JSON.
+        2. Validate Exercise Names against: [{exercise_list}].
+        3. CRITICAL: 'dieta' must be an array of 7 objects.
+        4. CRITICAL: 'treino' must be an array of 7 objects.
+        5. CRITICAL: 'suplementacao' must be a non-empty array.
         
-        REQUIRED JSON SCHEMA:
+        REQUIRED SCHEMA (NO EMPTY LISTS):
         {{
-          "avaliacao": {{ 
-            "segmentacao": {{ "tronco": "Txt", "superior": "Txt", "inferior": "Txt" }}, 
-            "dobras": {{ "abdominal": "Txt", "suprailiaca": "Txt", "peitoral": "Txt" }}, 
-            "analise_postural": "Txt", 
-            "simetria": "Txt", 
-            "insight": "Txt" 
-          }},
-          "dieta": [ 
-            {{ "dia": "Segunda-feira", "foco_nutricional": "Txt", "refeicoes": [ {{ "horario": "08:00", "nome": "Café", "alimentos": "3 Ovos..." }} ], "macros_totais": "Txt" }},
-            ... (MUST HAVE 7 ITEMS) ...
-          ],
-          "dieta_insight": "Txt",
-          "suplementacao": [ {{ "nome": "Creatina", "dose": "5g", "horario": "Pós", "motivo": "Força" }} ],
-          "suplementacao_insight": "Txt",
+          "avaliacao": {{ "segmentacao": {{...}}, "dobras": {{...}}, "analise_postural": "...", "simetria": "...", "insight": "..." }},
+          "dieta": [ {{ "dia": "Segunda", "foco_nutricional": "...", "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ], "macros_totais": "..." }}, ... ],
+          "dieta_insight": "...",
+          "suplementacao": [ {{ "nome": "...", "dose": "...", "horario": "...", "motivo": "..." }} ],
+          "suplementacao_insight": "...",
           "treino": [ 
-             {{ "dia": "Segunda-feira", "foco": "Peito", "exercicios": [ {{ "nome": "Supino", "series_reps": "4x10", "execucao": "Txt", "justificativa_individual": "Txt" }} ], "treino_alternativo": "Txt", "justificativa": "Txt" }},
-             ... (MUST HAVE 7 ITEMS) ...
+             {{ "dia": "Segunda", "foco": "...", "exercicios": [ {{ "nome": "...", "series_reps": "...", "execucao": "...", "justificativa_individual": "..." }} ], "treino_alternativo": "...", "justificativa": "..." }},
+             ...
           ],
-          "treino_insight": "Txt"
+          "treino_insight": "..."
         }}
         """
         
         try:
-            # Tenta estruturar usando o modelo rápido
+            # Tenta estruturar usando o modelo rápido com temperatura 0.0 (Correção do erro de JSON)
             json_text = AIOrchestrator._call_gemini_with_retry(
                 model_name=settings.STRUCTURING_MODELS[0],
                 prompt=prompt_p2,
                 image_bytes=None, 
                 json_mode=True,
-                temperature=0.1 # Precisão máxima
+                temperature=0.0 # ZERO CRIATIVIDADE AQUI PARA EVITAR ERROS DE SINTAXE
             )
             data = JSONRepairKit.parse_robust(json_text)
             
-            # VALIDAÇÃO DE INTEGRIDADE (Se vier vazio, força erro para retry ou fallback)
-            if not data.get('dieta') or len(data['dieta']) == 0:
-                raise AIProcessingError("IA retornou dieta vazia.")
-            if not data.get('treino') or len(data['treino']) == 0:
-                raise AIProcessingError("IA retornou treino vazio.")
-                
+            # Validação Failsafe
+            if not data.get('dieta'): data['dieta'] = []
+            if not data.get('treino'): data['treino'] = []
+            
             return data
             
         except Exception as e:
             logger.error(f"Fase 2 falhou. Tentando parsear texto original... {e}")
-            # Fallback: Tenta parsear o texto da fase 1 se ele já estiver em JSON
-            fallback_data = JSONRepairKit.parse_robust(strategy_text)
-            if not fallback_data.get('dieta'):
-                raise AIProcessingError("Falha total na geração de dados.")
-            return fallback_data
+            return JSONRepairKit.safe_parse(strategy_text)
 
     @staticmethod
     def simple_generation(prompt: str, image_bytes: Optional[bytes] = None) -> str:
@@ -742,7 +664,8 @@ class ImageService:
         try:
             with Image.open(io.BytesIO(file_bytes)) as img:
                 img = ImageOps.exif_transpose(img)
-                if img.mode != 'RGB': img = img.convert("RGB")
+                if img.mode != 'RGB':
+                    img = img.convert("RGB")
                 img.thumbnail(max_size)
                 output = io.BytesIO()
                 img.save(output, format='JPEG', quality=quality, optimize=True)
@@ -791,13 +714,13 @@ class PDFReport(FPDF):
         self.set_text_color(*self.col_azul)
         self.set_font("Arial", "B", 11)
         self.multi_cell(0, 6, self.sanitize(title), fill=True)
-        self.set_text_color(*self.col_text)
+        self.set_text_color(*self.col_texto)
         self.set_font("Arial", "", 10)
         self.multi_cell(0, 6, self.sanitize(body), fill=True)
         self.ln(2)
 
 # ==============================================================================
-# SEÇÃO 12: HELPERS DE NEGÓCIO E VALIDAÇÃO PÓS-IA
+# SEÇÃO 11: HELPERS DE NEGÓCIO
 # ==============================================================================
 
 def normalizar_texto(texto: str) -> str:
@@ -805,64 +728,46 @@ def normalizar_texto(texto: str) -> str:
     return "".join(c for c in unicodedata.normalize('NFD', str(texto)) if unicodedata.category(c) != 'Mn').lower().strip()
 
 def validar_exercicios_final(treino_data: list) -> list:
-    """Validação final pós-IA. Tenta casar nomes de exercícios gerados."""
-    exercicios_db = ExerciseRepository.get_db()
-    if not treino_data or not exercicios_db: return treino_data
+    """Validação final pós-IA. Tenta casar nomes de exercícios."""
+    db = ExerciseRepository.get_db()
+    if not treino_data or not db: return treino_data
     
     base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
-    
-    db_map_norm = {normalizar_texto(k): v for k, v in exercicios_db.items()}
-    db_title_map = {normalizar_texto(k): k for k, v in exercicios_db.items()}
+    db_map = {normalizar_texto(k): v for k, v in db.items()}
+    db_titles = {normalizar_texto(k): k for k, v in db.items()}
 
     for dia in treino_data:
         if 'exercicios' not in dia: continue
-        
         corrected_exs = []
         for ex in dia['exercicios']:
-            nome_ia = ex.get('nome', '')
-            nome_ia_norm = normalizar_texto(nome_ia)
+            raw_name = ex.get('nome', 'Exercício Geral')
+            norm_name = normalizar_texto(raw_name)
+            path = None
+            final_name = raw_name
             
-            pasta_github = None
-            nome_final = nome_ia 
-
-            if nome_ia_norm in db_map_norm:
-                pasta_github = db_map_norm[nome_ia_norm]
-                nome_final = db_title_map[nome_ia_norm].title()
+            if norm_name in db_map:
+                path = db_map[norm_name]
+                final_name = db_titles[norm_name]
             else:
-                matches = difflib.get_close_matches(nome_ia_norm, db_map_norm.keys(), n=1, cutoff=0.6)
+                matches = difflib.get_close_matches(norm_name, db_map.keys(), n=1, cutoff=0.6)
                 if matches:
-                    match_key = matches[0]
-                    pasta_github = db_map_norm[match_key]
-                    nome_final = db_title_map[match_key].title()
+                    path = db_map[matches[0]]
+                    final_name = db_titles[matches[0]]
                 else:
-                    melhor_candidato = None
-                    for key in db_map_norm.keys():
-                        if (key in nome_ia_norm and len(key) > 4) or (nome_ia_norm in key and len(nome_ia_norm) > 4): 
-                            melhor_candidato = key
+                    for k in db_map.keys():
+                        if k in norm_name or norm_name in k:
+                            path = db_map[k]
+                            final_name = db_titles[k]
                             break
-                    
-                    if melhor_candidato:
-                        pasta_github = db_map_norm[melhor_candidato]
-                        nome_final = db_title_map[melhor_candidato].title()
-                    else:
-                        fallback_key = "polichinelo" if "polichinelo" in db_map_norm else list(db_map_norm.keys())[0]
-                        pasta_github = db_map_norm[fallback_key]
-                        nome_final = f"{nome_ia} (Adaptado - Ver {db_title_map[fallback_key].title()})"
+                    if not path and "polichinelo" in db_map:
+                        path = db_map["polichinelo"]
+                        final_name = f"{raw_name} (Adaptado)"
 
-            ex['nome'] = nome_final
-            
-            if pasta_github:
-                ex['imagens_demonstracao'] = [
-                    f"{base_url}/{pasta_github}/0.jpg",
-                    f"{base_url}/{pasta_github}/1.jpg"
-                ]
-            else:
-                ex['imagens_demonstracao'] = [] 
-            
+            ex['nome'] = str(final_name).title()
+            if path: ex['imagens_demonstracao'] = [f"{base_url}/{path}/0.jpg", f"{base_url}/{path}/1.jpg"]
+            else: ex['imagens_demonstracao'] = []
             corrected_exs.append(ex)
-        
         dia['exercicios'] = corrected_exs
-
     return treino_data
 
 def calcular_medalha(username: str) -> str:
@@ -872,7 +777,7 @@ def calcular_medalha(username: str) -> str:
     except: return ""
 
 # ==============================================================================
-# SEÇÃO 13: APLICAÇÃO FASTAPI & ROTAS
+# SEÇÃO 12: APLICAÇÃO FASTAPI & ROTAS
 # ==============================================================================
 
 app = FastAPI(title=settings.API_TITLE, version=settings.API_VERSION)
@@ -894,7 +799,7 @@ def login(dados: UserLogin):
     user = col.find_one({"usuario": dados.usuario, "senha": dados.senha})
     
     if not user: raise HTTPException(401, "Credenciais inválidas")
-    if user.get("status") != "ativo" and not user.get("is_admin"): raise HTTPException(403, "Conta pendente de aprovação.")
+    if user.get("status") != "ativo" and not user.get("is_admin"): raise HTTPException(403, "Conta pendente.")
     
     return {
         "sucesso": True,
@@ -926,9 +831,7 @@ def registrar(dados: UserRegister):
 def atualizar_perfil(dados: UserUpdate):
     col = mongo_db.get_collection("usuarios")
     data = {k: v for k, v in dados.model_dump(exclude={'usuario'}).items() if v is not None}
-    res = col.update_one({"usuario": dados.usuario}, {"$set": data})
-    if res.matched_count == 0:
-        raise HTTPException(404, "Usuário não encontrado")
+    col.update_one({"usuario": dados.usuario}, {"$set": data})
     return {"sucesso": True}
 
 # --- ROTA CORE: ANÁLISE ---
@@ -942,65 +845,36 @@ async def executar_analise(
 ):
     logger.info(f"🚀 Iniciando análise completa para: {usuario}")
     
-    # 1. Parse seguro de dados numéricos
     try:
         peso_float = float(str(peso).replace(',', '.'))
-        alt_str = str(altura).replace(',', '.').replace('cm', '').strip()
-        altura_int = int(float(alt_str) * 100) if float(alt_str) < 3.0 else int(float(alt_str))
-    except:
-        peso_float = 70.0; altura_int = 175
+        alt = float(str(altura).replace(',', '.').replace('cm', '').strip())
+        altura_int = int(alt * 100) if alt < 3.0 else int(alt)
+    except: peso_float = 70.0; altura_int = 175
     
-    # 2. Atualiza/Busca dados do usuário
     col = mongo_db.get_collection("usuarios")
-    col.update_one({"usuario": usuario}, {"$set": {
-        "nome": nome_completo, "peso": peso_float, "altura": altura_int, 
-        "genero": genero, "info_add": observacoes
-    }})
+    col.update_one({"usuario": usuario}, {"$set": {"nome": nome_completo, "peso": peso_float, "altura": altura_int, "genero": genero, "info_add": observacoes}})
     user_data = col.find_one({"usuario": usuario})
-    if not user_data: raise HTTPException(404, "Usuário não encontrado durante a análise.")
+    if not user_data: raise HTTPException(404, "Erro de consistência de usuário.")
 
-    # 3. Processamento de Imagem
     raw_img = await foto.read()
     img_opt = ImageService.optimize(raw_img)
     
-    # 4. Prompt Engineering (Fase 1 - Raciocínio Profundo)
-    prompt_brain = f"""
-    ACT AS AN ELITE SPORTS SCIENTIST AND BIOCHEMIST.
-    Create a highly specialized transformation protocol.
-
-    SUBJECT: {nome_completo} ({genero})
-    METRICS: {peso_float}kg, {altura_int}cm
-    GOAL: {objetivo} (Top Priority)
-    RESTRICTIONS: {user_data.get('restricoes_fis')}, {user_data.get('restricoes_alim')}
-    CONTEXT: {observacoes}
-
-    TASKS:
-    1. VISUAL ANALYSIS: Analyze physique from image (fat distribution, muscle insertions, imbalances).
-    2. DIET PLAN (7 DAYS): Detailed menu for Monday-Sunday. Exact macros per meal.
-    3. TRAINING PLAN (7 DAYS): Monday-Sunday split.
-       - REQUIREMENT: High Volume (Minimum 8-10 exercises per session).
-       - SELECTION: Standard commercial gym equipment.
-       - BIOMECHANICS: Brief justification for key compound movements.
-    4. SUPPLEMENTATION: Evidence-based stack only.
+    prompt = f"""
+    ACT AS AN ELITE SPORTS SCIENTIST. CREATE THE ULTIMATE PROTOCOL.
+    CLIENT: {nome_completo} ({genero}), {peso_float}kg, {altura_int}cm.
+    GOAL: {objetivo}. RESTRICTIONS: {user_data.get('restricoes_fis')}, {user_data.get('restricoes_alim')}.
+    TASKS: 1. PHYSIQUE ANALYSIS. 2. DIET (7 DAYS). 3. TRAINING (7 DAYS). 4. SUPPLEMENTS.
     """
     
-    # 5. Execução do Pipeline CoT (Raciocínio -> Estruturação)
     try:
-        result_json = AIOrchestrator.execute_chain_of_thought(prompt_brain, img_opt)
-        
-        # FAILSAFE: Garante que os campos críticos existam
-        if not result_json.get('dieta'): result_json['dieta'] = []
-        if not result_json.get('treino'): result_json['treino'] = []
-            
+        result_json = AIOrchestrator.execute_chain_of_thought(prompt, img_opt)
     except Exception as e:
-        logger.error(f"Falha Crítica no Pipeline IA: {e}")
-        raise HTTPException(503, "Sistema de IA sobrecarregado. Por favor, tente novamente em 1 minuto.")
+        logger.error(f"CoT Failure: {e}")
+        raise HTTPException(503, "IA indisponível no momento. Tente novamente.")
 
-    # 6. Validação e Enriquecimento de Exercícios
     if 'treino' in result_json:
         result_json['treino'] = validar_exercicios_final(result_json['treino'])
 
-    # 7. Persistência e Cobrança
     dossie = {
         "id": str(ObjectId()),
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -1008,7 +882,6 @@ async def executar_analise(
         "peso_reg": peso_float,
         "conteudo_bruto": {
             "json_full": result_json,
-            # Campos legados
             "r1": str(result_json.get('avaliacao', {}).get('insight', '')),
             "r2": str(result_json.get('dieta_insight', '')),
             "r3": str(result_json.get('suplementacao_insight', '')),
@@ -1017,78 +890,58 @@ async def executar_analise(
     }
     
     update = {"$push": {"historico_dossies": dossie}}
-    # Admin não gasta créditos
-    if not user_data.get('is_admin'): 
-        update["$inc"] = {"avaliacoes_restantes": -1}
-        
+    if not user_data.get('is_admin'): update["$inc"] = {"avaliacoes_restantes": -1}
     col.update_one({"usuario": usuario}, update)
     
     return {"sucesso": True, "resultado": dossie}
 
 @app.post("/analise/regenerar-secao", tags=["Analise"])
 async def regenerar_secao(dados: dict = Body(...)):
-    """Regenera uma parte específica do protocolo usando IA."""
     col = mongo_db.get_collection("usuarios")
     user = col.find_one({"usuario": dados.get("usuario")})
     
     if not user or (user.get('avaliacoes_restantes', 0) <= 0 and not user.get('is_admin')):
-        return {"sucesso": False, "mensagem": "Saldo insuficiente para regeneração."}
+        return {"sucesso": False, "mensagem": "Saldo insuficiente."}
         
     secao = dados.get("secao")
     dia = dados.get("dia", "")
-    
-    prompt = f"Regenerate ONLY the '{secao}' section for client {user.get('nome')}. Context: {dia if dia else 'Full Week'}. Make it HARDCORE and DETAILED. Minimum 10 exercises/meals per day."
+    prompt = f"Regenerate '{secao}' for {user.get('nome')}. Focus: {dia if dia else 'Full Week'}. Make it HARDCORE."
     
     try:
-        # Usa CoT sem imagem para regeneração rápida
         new_content = AIOrchestrator.execute_chain_of_thought(prompt, None)
-        
-        # Merge no último dossiê
-        last_dossie = user['historico_dossies'][-1]
-        json_full = last_dossie['conteudo_bruto']['json_full']
+        last = user['historico_dossies'][-1]
+        full = last['conteudo_bruto']['json_full']
         
         if secao in new_content:
-            json_full[secao] = new_content[secao]
-            if f"{secao}_insight" in new_content:
-                json_full[f"{secao}_insight"] = new_content[f"{secao}_insight"]
+            full[secao] = new_content[secao]
+            if f"{secao}_insight" in new_content: full[f"{secao}_insight"] = new_content[f"{secao}_insight"]
         
         if secao == 'treino':
-            json_full['treino'] = validar_exercicios_final(json_full['treino'])
+            full['treino'] = validar_exercicios_final(full['treino'])
             
         col.update_one(
-            {"usuario": dados.get("usuario"), "historico_dossies.data": last_dossie['data']},
-            {"$set": {"historico_dossies.$.conteudo_bruto.json_full": json_full}}
+            {"usuario": dados.get("usuario"), "historico_dossies.data": last['data']},
+            {"$set": {"historico_dossies.$.conteudo_bruto.json_full": full}}
         )
-        return {"sucesso": True, "resultado": last_dossie}
-    except:
-        return {"sucesso": False}
+        return {"sucesso": True, "resultado": last}
+    except: return {"sucesso": False}
 
-# --- ROTA LEGADA PARA HISTÓRICO (PREVENÇÃO DE CRASH) ---
+# --- ROTA LEGADA PARA HISTÓRICO ---
 
 @app.get("/historico/{usuario}", tags=["Perfil"])
 def buscar_historico(usuario: str):
-    """
-    Retorna o histórico completo e perfil atualizado.
-    Rota crucial para evitar 'Exception not Found' no carregamento do app Flutter.
-    """
     col = mongo_db.get_collection("usuarios")
     user = col.find_one({"usuario": usuario})
-    if not user: 
-        # Retorna estrutura vazia válida em vez de 404 para não crashar o app
-        return {"sucesso": True, "historico": []}
+    if not user: return {"sucesso": True, "historico": []}
     
     return {
         "sucesso": True, 
         "historico": jsonable_encoder(user.get('historico_dossies', [])), 
         "creditos": user.get('avaliacoes_restantes', 0), 
         "perfil": {
-            "peso": user.get('peso'),
-            "altura": user.get('altura'),
-            "genero": user.get('genero', 'Masculino'),
-            "restricoes_alim": user.get('restricoes_alim', ''),
-            "restricoes_fis": user.get('restricoes_fis', ''),
-            "medicamentos": user.get('medicamentos', ''),
-            "info_add": user.get('info_add', ''),
+            "peso": user.get('peso'), "altura": user.get('altura'), "genero": user.get('genero'),
+            "restricoes_alim": user.get('restricoes_alim'), "restricoes_fis": user.get('restricoes_fis'),
+            "medicamentos": user.get('medicamentos'), "info_add": user.get('info_add'),
             "creditos": user.get('avaliacoes_restantes', 0)
         }
     }
@@ -1099,30 +952,15 @@ def buscar_historico(usuario: str):
 def get_feed():
     col = mongo_db.get_collection("posts")
     posts = list(col.find().sort("data", DESCENDING).limit(50))
-    for p in posts: 
-        p['_id'] = str(p['_id'])
-        p['medalha'] = calcular_medalha(p.get('autor'))
+    for p in posts: p['_id'] = str(p['_id'])
     return {"sucesso": True, "feed": posts}
 
 @app.post("/social/postar", tags=["Social"])
-async def postar(
-    usuario: str = Form(...), 
-    legenda: str = Form(...), 
-    imagem: UploadFile = File(...)
-):
+async def postar(usuario: str = Form(...), legenda: str = Form(...), imagem: UploadFile = File(...)):
     img_bytes = await imagem.read()
-    img_opt = ImageService.optimize(img_bytes, size=(600, 600))
-    
-    # Comentário rápido automático
-    cmt = AIOrchestrator.simple_generation(f"Gere um comentário curto, gíria maromba, motivador para esta legenda: '{legenda}'", img_opt)
-    
-    col = mongo_db.get_collection("posts")
-    col.insert_one({
-        "autor": usuario, "legenda": legenda, 
-        "imagem": base64.b64encode(img_opt).decode('utf-8'),
-        "data": datetime.now().isoformat(), "likes": [],
-        "comentarios": [{"autor": "TechnoBolt AI", "texto": cmt}] if cmt else []
-    })
+    img_opt = ImageService.optimize(img_bytes)
+    cmt = AIOrchestrator.simple_generation(f"Comentário gym bro para: {legenda}", img_opt)
+    mongo_db.get_collection("posts").insert_one({"autor": usuario, "legenda": legenda, "imagem": base64.b64encode(img_opt).decode('utf-8'), "data": datetime.now().isoformat(), "likes": [], "comentarios": [{"autor": "TechnoBolt AI", "texto": cmt}] if cmt else []})
     return {"sucesso": True}
 
 @app.post("/social/post/deletar", tags=["Social"])
@@ -1137,7 +975,6 @@ def curtir_post(dados: SocialPostRequest):
     oid = ObjectId(dados.post_id)
     post = col.find_one({"_id": oid})
     if not post: return {"sucesso": False}
-    
     if dados.usuario in post.get("likes", []):
         col.update_one({"_id": oid}, {"$pull": {"likes": dados.usuario}})
     else:
@@ -1147,11 +984,7 @@ def curtir_post(dados: SocialPostRequest):
 @app.post("/social/comentar", tags=["Social"])
 def postar_comentario(dados: SocialCommentRequest):
     col = mongo_db.get_collection("posts")
-    cmt = {
-        "autor": dados.usuario,
-        "texto": dados.texto,
-        "data": datetime.now().isoformat()
-    }
+    cmt = {"autor": dados.usuario, "texto": dados.texto, "data": datetime.now().isoformat()}
     col.update_one({"_id": ObjectId(dados.post_id)}, {"$push": {"comentarios": cmt}})
     return {"sucesso": True}
 
@@ -1166,10 +999,7 @@ def get_ranking():
 @app.get("/social/checkins", tags=["Social"])
 def get_checkins(usuario: str):
     col = mongo_db.get_collection("checkins")
-    now = datetime.now()
-    start = datetime(now.year, now.month, 1).isoformat()
-    checkins = list(col.find({"usuario": usuario, "data": {"$gte": start}}))
-    
+    checkins = list(col.find({"usuario": usuario}))
     formatted = {}
     for c in checkins:
         try:
@@ -1179,32 +1009,21 @@ def get_checkins(usuario: str):
     return {"sucesso": True, "checkins": formatted}
 
 @app.post("/social/validar-conquista", tags=["Social"])
-async def validar_conquista(
-    usuario: str = Form(...),
-    tipo: str = Form(...), 
-    foto: UploadFile = File(...)
-):
-    """Valida checkin via IA de Visão."""
+async def validar_conquista(usuario: str = Form(...), tipo: str = Form(...), foto: UploadFile = File(...)):
     col = mongo_db.get_collection("checkins")
     now = datetime.now()
-    today_start = datetime(now.year, now.month, now.day).isoformat()
-    
-    if col.find_one({"usuario": usuario, "data": {"$gte": today_start}}):
-        return {"sucesso": False, "mensagem": "Checkin já realizado hoje."}
+    today = datetime(now.year, now.month, now.day).isoformat()
+    if col.find_one({"usuario": usuario, "data": {"$gte": today}}): return {"sucesso": False, "mensagem": "Checkin já realizado."}
 
     content = await foto.read()
     img_opt = ImageService.optimize(content)
-    
-    # Usa modelo rápido para visão
     resp = AIOrchestrator.simple_generation(f"Valide se esta imagem comprova um treino de {tipo}. Responda APROVADO ou REPROVADO.", img_opt)
     
     if resp and "APROVADO" in resp.upper():
-        pts = 50
-        col.insert_one({"usuario": usuario, "tipo": tipo, "data": now.isoformat(), "pontos": pts})
-        mongo_db.get_collection("usuarios").update_one({"usuario": usuario}, {"$inc": {"pontos": pts}})
-        return {"sucesso": True, "aprovado": True, "pontos": pts}
-    else:
-        return {"sucesso": True, "aprovado": False, "mensagem": "Não foi possível validar o treino pela imagem."}
+        col.insert_one({"usuario": usuario, "tipo": tipo, "data": now.isoformat(), "pontos": 50})
+        mongo_db.get_collection("usuarios").update_one({"usuario": usuario}, {"$inc": {"pontos": 50}})
+        return {"sucesso": True, "aprovado": True, "pontos": 50}
+    return {"sucesso": True, "aprovado": False}
 
 # --- CHAT & ADMIN ---
 
@@ -1250,8 +1069,8 @@ def admin_del(dados: AdminUserEdit):
 @app.get("/setup/criar-admin", tags=["Admin"])
 def create_admin():
     col = mongo_db.get_collection("usuarios")
-    if col.find_one({"usuario": "admin"}): return {"sucesso": False, "mensagem": "Admin existe."}
-    col.insert_one({"usuario": "admin", "senha": "123", "nome": "Super Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999})
+    if col.find_one({"usuario": "admin"}): return {"sucesso": False}
+    col.insert_one({"usuario": "admin", "senha": "123", "nome": "Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999})
     return {"sucesso": True}
 
 # --- PDF ---
@@ -1270,32 +1089,26 @@ def download_pdf(usuario: str):
         pdf.add_page()
         pdf.chapter_title(f"RELATORIO: {user.get('nome', '').upper()}")
         
-        if 'avaliacao' in data:
-            pdf.card("Avaliação", data['avaliacao'].get('insight', ''))
-            
+        if 'avaliacao' in data: pdf.card("Avaliação", data['avaliacao'].get('insight', ''))
         if 'dieta' in data:
             pdf.add_page()
             pdf.chapter_title("DIETA 7 DIAS")
             for d in data['dieta']:
                 pdf.card(f"{d.get('dia')} - {d.get('foco_nutricional')}", d.get('macros_totais'))
-                for r in d.get('refeicoes', []):
-                    pdf.chapter_body(f"{r.get('horario')}: {r.get('alimentos')}")
-        
+                for r in d.get('refeicoes', []): pdf.chapter_body(f"{r.get('horario')}: {r.get('alimentos')}")
         if 'treino' in data:
             pdf.add_page()
-            pdf.chapter_title("TREINO HARDCORE 7 DIAS")
+            pdf.chapter_title("TREINO 7 DIAS")
             for t in data['treino']:
                 pdf.card(f"{t.get('dia')} - {t.get('foco')}", t.get('justificativa', ''))
-                for ex in t.get('exercicios', []):
-                    pdf.chapter_body(f"> {ex.get('nome')} [{ex.get('series_reps')}]")
-
+                for ex in t.get('exercicios', []): pdf.chapter_body(f"> {ex.get('nome')} [{ex.get('series_reps')}]")
+        
         buf = io.BytesIO()
         out = pdf.output(dest='S')
         if isinstance(out, str): buf.write(out.encode('latin-1'))
         else: buf.write(out)
         buf.seek(0)
-        
-        return StreamingResponse(buf, media_type="application/pdf", headers={'Content-Disposition': 'attachment; filename="TechnoBolt.pdf"'})
+        return StreamingResponse(buf, media_type="application/pdf", headers={'Content-Disposition': 'attachment; filename="report.pdf"'})
     except Exception as e:
         logger.error(f"PDF Err: {e}")
         raise HTTPException(500)
