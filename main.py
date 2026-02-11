@@ -1,9 +1,9 @@
 """
 TechnoBolt Gym Hub API - Enterprise Architect Edition
-Version: 2026.5.0-Titanium-Max
+Version: 2026.5.1-Titanium-Max-Tuned
 Architecture: Modular Monolith | Hexagonal-ish | Event-Driven AI Pipeline
 Author: TechnoBolt Engineering Team (Principal Architect)
-Timestamp: 2026-02-11 16:45:00 UTC
+Timestamp: 2026-02-11 17:15:00 UTC
 
 System Overview:
 This backend serves as the central nervous system for the TechnoBolt ecosystem.
@@ -885,7 +885,24 @@ class AIOrchestrator:
                 # --- PHASE 1: REASONING (The Brain) ---
                 logger.info(f"🧠 [Phase 1 - Reasoning] Running on {model}...")
                 
-                prompt_p1 = context_prompt + "\n\nCRITICAL INSTRUCTION: Think step-by-step. Generate a HIGHLY DETAILED, VERBOSE text strategy. Do not output JSON yet. Focus on biomechanics, biochemistry, and volume."
+                # UPDATE 1: Enhanced Physical Assessment & Caloric Surplus Logic
+                prompt_p1 = context_prompt + """
+                \n\nCRITICAL INSTRUCTION: Think step-by-step. Generate a HIGHLY DETAILED, VERBOSE text strategy. 
+                Do not output JSON yet. Focus on:
+                
+                1. VISUAL ASSESSMENT: 
+                   - Analyze posture, symmetry, muscle insertions, and estimated body fat % from the image. 
+                   - Be specific about weak points.
+                
+                2. DIET & CALORIC SURPLUS:
+                   - Explicitly state the daily caloric surplus target (e.g., +300kcal).
+                   - Calculate total daily calories and macros.
+                   - Show the math: BMR + Activity + Surplus.
+                
+                3. TRAINING OPTIMIZATION:
+                   - Ensure High Volume (10+ exercises per session).
+                   - PROVIDE BIOMECHANICAL JUSTIFICATION for every single exercise. Explain WHY it was chosen.
+                """
                 
                 strategy_text = AIOrchestrator._call_gemini_with_retry(
                     model_name=model,
@@ -901,6 +918,7 @@ class AIOrchestrator:
                 
                 exercise_list_str = ExerciseRepository.get_keys_string()
                 
+                # UPDATE 2: Strict JSON Schema Enforcement
                 prompt_p2 = f"""
                 TASK: Act as a Strict JSON Compiler.
                 Convert the following Fitness Strategy into VALID JSON matching the schema.
@@ -911,23 +929,47 @@ class AIOrchestrator:
                 CONSTRAINTS:
                 1. Output ONLY pure JSON.
                 2. DATA INTEGRITY:
-                   - 'dieta': Must contain 7 objects (Monday-Sunday).
+                   - 'dieta': Must contain 7 objects (Monday-Sunday). Include 'superavit_calorico' field.
                    - 'treino': Must contain 7 objects (Monday-Sunday).
                    - 'suplementacao': Must not be empty.
                 3. VALIDATION: Map exercises to: [{exercise_list_str}]. Use closest match or "(Adaptado)".
                 
                 REQUIRED SCHEMA:
                 {{
-                  "avaliacao": {{ "segmentacao": {{...}}, "dobras": {{...}}, "analise_postural": "...", "simetria": "...", "insight": "..." }},
-                  "dieta": [ {{ "dia": "Segunda", "foco_nutricional": "...", "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ], "macros_totais": "..." }}, ... ],
-                  "dieta_insight": "...",
+                  "avaliacao": {{ 
+                      "segmentacao": {{ "tronco": "Txt", "superior": "Txt", "inferior": "Txt" }}, 
+                      "dobras": {{ "abdominal": "Txt", "suprailiaca": "Txt", "peitoral": "Txt" }}, 
+                      "analise_postural": "Txt", 
+                      "simetria": "Txt", 
+                      "estimativa_gordura": "Txt",
+                      "insight": "Txt" 
+                  }},
+                  "dieta": [ 
+                    {{ 
+                      "dia": "Segunda", 
+                      "foco_nutricional": "Txt", 
+                      "superavit_calorico": "Txt",
+                      "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ], 
+                      "macros_totais": "Txt" 
+                    }}, 
+                    ... 
+                  ],
+                  "dieta_insight": "Txt",
                   "suplementacao": [ {{ "nome": "...", "dose": "...", "horario": "...", "motivo": "..." }} ],
-                  "suplementacao_insight": "...",
+                  "suplementacao_insight": "Txt",
                   "treino": [ 
-                     {{ "dia": "Segunda", "foco": "...", "exercicios": [ {{ "nome": "...", "series_reps": "...", "execucao": "...", "justificativa_individual": "..." }} ], "treino_alternativo": "...", "justificativa": "..." }},
+                     {{ 
+                        "dia": "Segunda", 
+                        "foco": "...", 
+                        "exercicios": [ 
+                            {{ "nome": "...", "series_reps": "...", "execucao": "...", "justificativa_biomecanica": "Txt" }} 
+                        ], 
+                        "treino_alternativo": "...", 
+                        "justificativa": "..." 
+                     }},
                      ...
                   ],
-                  "treino_insight": "..."
+                  "treino_insight": "Txt"
                 }}
                 """
                 
@@ -1060,13 +1102,17 @@ async def execute_analysis_endpoint(
     raw_img = await foto.read()
     img_opt = ImageService.optimize(raw_img)
     
-    # 4. Prompt Construction
+    # 4. Prompt Construction - UPDATE: More aggressive instruction
     prompt = f"""
     ACT AS AN ELITE SPORTS SCIENTIST.
     SUBJECT: {nome_completo} ({genero}), {p_float}kg, {alt_int}cm.
     GOAL: {objetivo}. 
     RESTRICTIONS: {user.get('restricoes_fis', 'None')}, {user.get('restricoes_alim', 'None')}.
-    TASKS: Physique Analysis, 7-Day Diet, 7-Day Hypertrophy Training, Supplementation.
+    TASKS: 
+    1. Visual Assessment (Be critical).
+    2. Diet for Hypertrophy (Surplus required).
+    3. High Volume Training (10+ Exercises/day).
+    4. Advanced Supplementation.
     """
     
     # 5. AI Execution
