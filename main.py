@@ -1,9 +1,9 @@
 """
-TechnoBolt Gym Hub API - Enterprise Architect Edition
-Version: 2026.5.3-Titanium-Max-Ultra
+TechnoBolt Gym Hub API - Enterprise Architect Edition (Titanium-Max-Ultra-Final)
+Version: 2026.5.4-Production
 Architecture: Modular Monolith | Hexagonal-ish | Event-Driven AI Pipeline
 Author: TechnoBolt Engineering Team (Principal Architect)
-Timestamp: 2026-02-11 17:45:00 UTC
+Timestamp: 2026-02-11 18:00:00 UTC
 
 System Overview:
 This backend serves as the central nervous system for the TechnoBolt ecosystem.
@@ -34,14 +34,16 @@ import traceback
 import hashlib
 import uuid
 import sys
+import threading
 from datetime import datetime, timedelta
 from typing import (
     List, Optional, Any, Dict, Union, Callable, TypeVar, Tuple, Set, 
-    Generator, AsyncGenerator, Coroutine
+    Generator, AsyncGenerator, Coroutine, Generic
 )
 from enum import Enum, auto
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from collections import OrderedDict
 
 # --- FRAMEWORKS E UTILITÁRIOS EXTERNOS ---
 from fastapi import (
@@ -105,26 +107,29 @@ from fpdf import FPDF
 # ==============================================================================
 
 class RequestContext:
-    """Stores context for the current request execution flow."""
-    _request_id: str = "system-startup"
+    """
+    Context manager for request-scoped data.
+    Ensures that every log message can be traced back to a specific user request.
+    """
+    _local = threading.local()
 
     @classmethod
     def set_id(cls, req_id: str):
-        cls._request_id = req_id
+        cls._local.req_id = req_id
 
     @classmethod
     def get_id(cls) -> str:
-        return cls._request_id
+        return getattr(cls._local, 'req_id', 'system-boot')
 
 class EnterpriseLogger:
     """
     Structured logging system designed for high-concurrency production environments.
-    Ensures every log entry is traceable to a specific request ID.
+    Ensures every log entry is traceable to a specific request ID and provides standardized formatting.
     """
     
     @staticmethod
     def setup() -> logging.Logger:
-        """Configures the root logger with custom formatting."""
+        """Configures the root logger with custom formatting and stream handling."""
         logger = logging.getLogger("TechnoBoltAPI")
         logger.setLevel(logging.INFO)
         
@@ -140,12 +145,27 @@ class EnterpriseLogger:
                 record.req_id = RequestContext.get_id()
                 return True
 
-        formatter = logging.Formatter(
-            fmt='%(asctime)s | %(levelname)-8s | [%(req_id)s] | %(module)s:%(funcName)s:%(lineno)d | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        
-        handler.setFormatter(formatter)
+        # ANSI Colors for better DX
+        class ColoredFormatter(logging.Formatter):
+            grey = "\x1b[38;20m"
+            yellow = "\x1b[33;20m"
+            red = "\x1b[31;20m"
+            bold_red = "\x1b[31;1m"
+            reset = "\x1b[0m"
+            format_str = '%(asctime)s | %(levelname)-8s | [%(req_id)s] | %(module)s:%(funcName)s:%(lineno)d | %(message)s'
+
+            def format(self, record):
+                log_fmt = self.format_str
+                if record.levelno == logging.WARNING:
+                    log_fmt = self.yellow + self.format_str + self.reset
+                elif record.levelno == logging.ERROR:
+                    log_fmt = self.red + self.format_str + self.reset
+                elif record.levelno == logging.CRITICAL:
+                    log_fmt = self.bold_red + self.format_str + self.reset
+                formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d %H:%M:%S')
+                return formatter.format(record)
+
+        handler.setFormatter(ColoredFormatter())
         handler.addFilter(ContextFilter())
         logger.addHandler(handler)
         
@@ -162,6 +182,7 @@ def initialize_media_drivers():
     """
     Registers external codecs for image processing.
     Crucial for handling HEIC uploads from iOS devices in the Flutter app.
+    This runs once at startup.
     """
     try:
         logger.info("🔧 Initializing Pillow HEIF opener...")
@@ -203,7 +224,7 @@ class Settings:
         
         # API Metadata
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "121.0-Architect"
+        self.API_VERSION = "2026.5.4-Titanium-Max-Ultra"
         self.ENV = self._get_env("ENV", "production")
         
         # AI Configuration (Load Balancer Pool)
@@ -217,6 +238,8 @@ class Settings:
             "models/gemini-2.0-flash",        # Tertiary: Fallback
             "models/gemini-flash-latest"      # Quaternary: Last Resort
         ]
+        
+        # We don't separate structuring models anymore to keep context consistent
         
         logger.info(f"🧠 AI Priority Chain Loaded: {len(self.AI_MODELS_PRIORITY)} models active.")
 
@@ -236,7 +259,9 @@ class Settings:
         """Loads and validates the API Key pool for rotation."""
         keys = []
         for i in range(1, 21):
-            key_val = os.environ.get(f"GEMINI_CHAVE_{i}")
+            key_var_name = f"GEMINI_CHAVE_{i}"
+            key_val = os.environ.get(key_var_name)
+            
             if key_val and len(key_val.strip()) > 20: # Basic validation
                 keys.append(key_val.strip())
         
@@ -708,6 +733,28 @@ class PDFReport(FPDF):
         self.multi_cell(0, 6, self.sanitize(body), fill=True)
         self.ln(2)
 
+class CacheManager:
+    """
+    Simple In-Memory LRU Cache to reduce AI load for repeated queries.
+    Uses `OrderedDict` to maintain access order.
+    """
+    _cache = OrderedDict()
+    _capacity = 100 # Keep last 100 entries
+
+    @classmethod
+    def get(cls, key: str) -> Any:
+        if key in cls._cache:
+            cls._cache.move_to_end(key) # Mark as recently used
+            return cls._cache[key]
+        return None
+
+    @classmethod
+    def set(cls, key: str, value: Any):
+        cls._cache[key] = value
+        cls._cache.move_to_end(key)
+        if len(cls._cache) > cls._capacity:
+            cls._cache.popitem(last=False) # Remove oldest
+
 # ==============================================================================
 # SECTION 9: AI INFRASTRUCTURE (KEY ROTATION)
 # ==============================================================================
@@ -969,8 +1016,16 @@ class AIOrchestrator:
 
     @staticmethod
     def simple_generation(prompt: str, image_bytes: Optional[bytes] = None) -> str:
+        # Check cache first
+        cache_key = hashlib.md5((prompt + str(image_bytes)).encode()).hexdigest()
+        cached = CacheManager.get(cache_key)
+        if cached: return cached
+
         for model in settings.AI_MODELS_PRIORITY:
-            try: return AIOrchestrator._call_gemini_with_retry(model, prompt, image_bytes, False)
+            try: 
+                result = AIOrchestrator._call_gemini_with_retry(model, prompt, image_bytes, False)
+                CacheManager.set(cache_key, result)
+                return result
             except: continue
         return "Processing..."
 
