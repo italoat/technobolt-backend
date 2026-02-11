@@ -1,6 +1,6 @@
 """
 TechnoBolt Gym Hub API - Enterprise Edition (Titanium-FullScope-Max)
-Version: 115.0-Production-Release
+Version: 116.0-Production-Release (Zero-Truncation)
 Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline & Multi-Level Rotation
 Author: TechnoBolt Engineering Team (Senior Lead)
 Timestamp: 2026-02-11
@@ -429,7 +429,7 @@ class MongoBaseModel(BaseModel):
 
 class UserLogin(BaseModel):
     """Schema para endpoint de login."""
-    usuario: str = Field(..., min_length=3, description="Nome de usuário")
+    usuario: str = Field(..., min_length=3, description="Nome de usuário único")
     senha: str = Field(..., min_length=3, description="Senha do usuário")
 
 class UserRegister(BaseModel):
@@ -483,8 +483,8 @@ class AdminUserEdit(BaseModel):
 
 class ExerciseRepository:
     """
-    Carrega e mantém em memória o banco de dados de exercícios.
-    Usado para validação de output da IA e blindagem de contexto.
+    Gerencia o carregamento e consulta do banco de exercícios local.
+    Implementa Singleton para manter cache em memória e evitar I/O repetitivo.
     """
     _db: Dict[str, str] = {}
     _keys_string: str = ""
@@ -530,61 +530,202 @@ class ExerciseRepository:
 ExerciseRepository.load()
 
 # ==============================================================================
-# SEÇÃO 9: SISTEMA DE ROTATIVIDADE DE CHAVES (LOAD BALANCER DE IA)
+# SEÇÃO 9: SISTEMA DE ROTATIVIDADE DE CHAVES (API KEY MANAGER)
 # ==============================================================================
 
 class KeyRotationManager:
     """
-    Gerencia o pool de chaves de API da IA.
-    Implementa:
-    1. Balanceamento de Carga (Round Robin / Shuffle).
-    2. Circuit Breaker (Cooldown temporário para chaves com erro 429).
+    Gerencia o pool de chaves de API, implementando lógica de Round-Robin
+    e Cooldown temporário para chaves que atingem o Rate Limit (429).
     """
     def __init__(self, keys: List[str]):
         self.keys = keys
         self.cooldowns: Dict[str, float] = {} # Armazena timestamp de liberação
-        self.COOLDOWN_SECONDS = 60.0 # Tempo de castigo para chave exaurida
+        self.COOLDOWN_SECONDS = 60.0
 
     def get_available_keys(self) -> List[str]:
         """Retorna lista de chaves que não estão em cooldown."""
         now = time.time()
-        
         # Limpa cooldowns expirados
-        expired_keys = [k for k, v in self.cooldowns.items() if v <= now]
-        for k in expired_keys:
-            del self.cooldowns[k]
-            
-        # Filtra chaves disponíveis
+        self.cooldowns = {k: v for k, v in self.cooldowns.items() if v <= now}
+        
         available = [k for k in self.keys if k not in self.cooldowns]
         
-        # Estratégia Fail-Open: Se todas estiverem bloqueadas, retorna todas
+        # Se todas estiverem bloqueadas, retorna a lista completa (Fail-Open strategy)
         # (Melhor tentar e falhar do que não tentar nada)
         if not available and self.keys:
-            logger.warning("⚠️ Todas as chaves em cooldown. Forçando uso do pool completo (Fail-Open).")
+            logger.warning("⚠️ Todas as chaves em cooldown. Forçando uso do pool completo.")
             return self.keys
             
-        # Embaralha para evitar hot-spots na mesma chave
+        # Embaralha para balanceamento de carga estatístico (Evita hot-spots)
         random.shuffle(available)
         return available
 
     def report_rate_limit(self, key: str):
-        """Registra que uma chave atingiu o limite (HTTP 429) e a coloca em cooldown."""
-        logger.warning(f"⚠️ Rate Limit atingido na chave ...{key[-4:]}. Bloqueando por {self.COOLDOWN_SECONDS}s.")
+        """Marca uma chave como 'esgotada' temporariamente."""
+        logger.warning(f"⚠️ Rate Limit atingido na chave ...{key[-4:]}. Pausando por {self.COOLDOWN_SECONDS}s.")
         self.cooldowns[key] = time.time() + self.COOLDOWN_SECONDS
 
 # Instância global do gerenciador de chaves
 key_manager = KeyRotationManager(settings.GEMINI_KEYS)
 
 # ==============================================================================
-# SEÇÃO 10: SERVIÇOS DE IA - CORE LOGIC & CHAIN OF THOUGHT
+# SEÇÃO 10: SERVIÇOS AUXILIARES (HELPERS, IMAGEM E PDF)
+# ==============================================================================
+# IMPORTANTE: Definido ANTES da lógica de IA para evitar problemas de escopo.
+
+def normalizar_texto(texto: str) -> str:
+    """Normaliza texto para comparações fuzzy (lowercase, sem acentos)."""
+    if not texto: return ""
+    return "".join(c for c in unicodedata.normalize('NFD', str(texto)) if unicodedata.category(c) != 'Mn').lower().strip()
+
+def validar_exercicios_final(treino_data: list) -> list:
+    """
+    Validação final pós-IA.
+    Tenta casar nomes de exercícios gerados com pastas de imagens locais (Github).
+    """
+    db = ExerciseRepository.get_db()
+    if not treino_data or not db: return treino_data
+    
+    base_url = "https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises"
+    
+    # Mapas de busca O(1)
+    db_map = {normalizar_texto(k): v for k, v in db.items()}
+    db_titles = {normalizar_texto(k): k for k, v in db.items()}
+
+    for dia in treino_data:
+        if 'exercicios' not in dia: continue
+        
+        corrected_exs = []
+        for ex in dia['exercicios']:
+            raw_name = ex.get('nome', 'Exercício Geral')
+            norm_name = normalizar_texto(raw_name)
+            
+            path = None
+            final_name = raw_name
+            
+            # 1. Match Exato
+            if norm_name in db_map:
+                path = db_map[norm_name]
+                final_name = db_titles[norm_name]
+            else:
+                # 2. Match por Similaridade
+                matches = difflib.get_close_matches(norm_name, db_map.keys(), n=1, cutoff=0.6)
+                if matches:
+                    path = db_map[matches[0]]
+                    final_name = db_titles[matches[0]]
+                else:
+                    # 3. Match por Substring
+                    for k in db_map.keys():
+                        if k in norm_name or norm_name in k:
+                            path = db_map[k]
+                            final_name = db_titles[k]
+                            break
+                    # 4. Fallback
+                    if not path and "polichinelo" in db_map:
+                        path = db_map["polichinelo"]
+                        final_name = f"{raw_name} (Adaptado)"
+
+            # Atualiza objeto
+            ex['nome'] = str(final_name).title()
+            if path:
+                ex['imagens_demonstracao'] = [
+                    f"{base_url}/{path}/0.jpg",
+                    f"{base_url}/{path}/1.jpg"
+                ]
+            else:
+                ex['imagens_demonstracao'] = []
+            
+            corrected_exs.append(ex)
+        
+        dia['exercicios'] = corrected_exs
+            
+    return treino_data
+
+def calcular_medalha(username: str) -> str:
+    """Calcula medalha do usuário para gamificação."""
+    try:
+        user = mongo_db.get_collection("usuarios").find_one({"usuario": username})
+        return "🥇" if user and user.get('pontos', 0) > 1000 else ""
+    except: return ""
+
+class ImageService:
+    """Utilitários para processamento e otimização de imagens."""
+    
+    @staticmethod
+    def optimize(file_bytes: bytes, quality: int = 75, max_size: tuple = (800, 800)) -> bytes:
+        try:
+            with Image.open(io.BytesIO(file_bytes)) as img:
+                # Corrige orientação EXIF (comum em fotos de celular)
+                img = ImageOps.exif_transpose(img)
+                # Converte para RGB (necessário para salvar como JPEG)
+                if img.mode != 'RGB':
+                    img = img.convert("RGB")
+                # Resize inteligente
+                img.thumbnail(max_size)
+                
+                output = io.BytesIO()
+                img.save(output, format='JPEG', quality=quality, optimize=True)
+                return output.getvalue()
+        except Exception as e:
+            logger.error(f"Erro na otimização de imagem: {e}. Usando original.")
+            return file_bytes
+
+class PDFReport(FPDF):
+    """Gerador de relatórios PDF customizado."""
+    def __init__(self):
+        super().__init__()
+        self.set_auto_page_break(auto=True, margin=15)
+        self.col_bg = (20, 20, 25)
+        self.col_text = (230, 230, 230)
+        self.col_accent = (0, 200, 255)
+
+    def sanitize(self, txt: Any) -> str:
+        if not txt: return ""
+        s = str(txt).replace("’", "'").replace("–", "-")
+        # Garante compatibilidade Latin-1 do FPDF
+        return s.encode('latin-1', 'replace').decode('latin-1')
+
+    def header(self):
+        self.set_fill_color(*self.col_bg)
+        self.rect(0, 0, 210, 297, 'F')
+        self.set_font("Arial", "B", 20)
+        self.set_text_color(*self.col_accent)
+        self.cell(0, 10, "TECHNOBOLT PROTOCOL", 0, 1, 'C')
+        self.ln(10)
+
+    def chapter_title(self, label):
+        self.set_font("Arial", "B", 14)
+        self.set_text_color(*self.col_accent)
+        self.cell(0, 10, self.sanitize(label.upper()), 0, 1, 'L')
+        self.line(10, self.get_y(), 200, self.get_y())
+        self.ln(5)
+
+    def chapter_body(self, body):
+        self.set_font("Arial", "", 10)
+        self.set_text_color(*self.col_text)
+        self.multi_cell(0, 6, self.sanitize(body))
+        self.ln()
+    
+    def card(self, title, body):
+        self.set_fill_color(30, 30, 35) # Hardcoded para evitar dependencia
+        self.set_text_color(*self.col_azul if hasattr(self, 'col_azul') else self.col_accent)
+        self.set_font("Arial", "B", 11)
+        self.multi_cell(0, 6, self.sanitize(title), fill=True)
+        self.set_text_color(*self.col_text)
+        self.set_font("Arial", "", 10)
+        self.multi_cell(0, 6, self.sanitize(body), fill=True)
+        self.ln(2)
+
+# ==============================================================================
+# SEÇÃO 11: SERVIÇOS DE IA - LÓGICA CORE (CHAIN OF THOUGHT)
 # ==============================================================================
 
 class JSONRepairKit:
     """
-    Ferramentas avançadas de engenharia de software para reparo de JSON.
-    Corrige erros sintáticos comuns gerados por LLMs (vírgulas, aspas, markdown).
+    Ferramentas avançadas para reparo de strings JSON malformadas.
+    Resolve problemas de sintaxe comuns em LLMs (Trailing commas, Markdown blocks).
     """
-    
     @staticmethod
     def fix_json_string(text: str) -> str:
         """Aplica uma série de regex para limpar e corrigir a string."""
@@ -653,75 +794,75 @@ class JSONRepairKit:
 
 class AIOrchestrator:
     """
-    Orquestrador da Cadeia de Pensamento (Chain of Thought).
-    Coordena as chamadas aos modelos, gerencia o rodízio e aplica a estratégia de duas fases.
+    Orquestrador principal da IA. Implementa a arquitetura Chain of Thought
+    com rodízio de chaves aninhado e correção automática de geração vazia.
     """
-
+    
     @staticmethod
     def _call_gemini_with_retry(model_name: str, prompt: str, image_bytes: Optional[bytes] = None, 
                               json_mode: bool = False, temperature: float = 0.7) -> str:
         """
-        Executa a chamada à API do Google Gemini.
-        Implementa loop de tentativas sobre as chaves disponíveis.
+        NÚCLEO DO RODÍZIO:
+        Tenta TODAS as chaves disponíveis para o modelo especificado.
         """
         keys = key_manager.get_available_keys()
         if not keys:
-            raise AIProcessingError("Pool de chaves de API esgotado.")
-
+            raise AIProcessingError("Sem chaves de API disponíveis no pool.")
+            
         last_error = None
-
+        
         # Itera sobre todas as chaves disponíveis
         for api_key in keys:
             try:
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel(model_name)
                 
-                generation_config = genai.types.GenerationConfig(
+                # Configuração dinâmica baseada no modo
+                config = genai.types.GenerationConfig(
                     response_mime_type="application/json" if json_mode else "text/plain",
-                    max_output_tokens=8192, # Janela larga
+                    max_output_tokens=8192, # Contexto aumentado
                     temperature=temperature
                 )
                 
-                content_parts = [prompt]
+                inputs = [prompt]
                 if image_bytes:
-                    content_parts.append({"mime_type": "image/jpeg", "data": image_bytes})
+                    inputs.append({"mime_type": "image/jpeg", "data": image_bytes})
                 
                 # Chamada Síncrona (FastAPI gerencia threads)
-                response = model.generate_content(content_parts, generation_config=generation_config)
+                response = model.generate_content(inputs, generation_config=config)
                 
                 if response and response.text:
-                    logger.info(f"   ✅ Sucesso no modelo {model_name} (Key final ...{api_key[-4:]})")
+                    logger.info(f"   ✅ Sucesso: {model_name} (Key final ...{api_key[-4:]})")
                     return response.text
                 
             except Exception as e:
                 err_str = str(e)
-                # Detecta erro de cota
+                # Verifica se é erro de cota (429)
                 if "429" in err_str or "Resource exhausted" in err_str:
                     key_manager.report_rate_limit(api_key)
                 
-                logger.warning(f"   ⚠️ Falha na chave ...{api_key[-4:]} com {model_name}: {err_str[:100]}")
+                logger.warning(f"   ⚠️ Falha parcial: {model_name} (Key ...{api_key[-4:]}): {err_str[:100]}")
                 last_error = e
+                # Delay para evitar spam na API
+                time.sleep(1.0) 
+                continue # Tenta próxima chave
                 
-                # Breve pausa para evitar martelar a API
-                time.sleep(1.0)
-                continue 
-        
-        # Se saiu do loop, todas as chaves falharam para este modelo
-        logger.error(f"❌ Falha total ao invocar modelo {model_name}.")
-        raise last_error if last_error else Exception(f"Falha desconhecida no modelo {model_name}")
+        # Se saiu do loop, falhou com todas as chaves
+        logger.error(f"❌ Falha total ao invocar modelo {model_name} com todas as chaves disponíveis.")
+        raise last_error if last_error else Exception(f"Falha total no modelo {model_name}")
 
     @staticmethod
     def execute_chain_of_thought(context_prompt: str, image_bytes: Optional[bytes]) -> Dict:
         """
-        Executa o Pipeline Bifásico:
-        1. RACIOCÍNIO (Brain): Gera texto rico e detalhado.
-        2. ESTRUTURAÇÃO (Formatter): Converte para JSON estrito.
+        Pipeline Principal (Two-Pass Generation):
+        1. FASE 1: Raciocínio (Brain) -> Gera texto livre e detalhado.
+        2. FASE 2: Estruturação (Formatter) -> Converte para JSON estrito.
         """
         
         # --- FASE 1: RACIOCÍNIO (Brain) ---
         strategy_text = None
         
-        # Tenta os modelos de raciocínio na ordem de preferência
+        # Tenta cada modelo de raciocínio na ordem de preferência
         for model in settings.REASONING_MODELS:
             try:
                 logger.info(f"🧠 [Fase 1 - Brain] Iniciando Raciocínio com {model}...")
@@ -733,19 +874,19 @@ class AIOrchestrator:
                     prompt=prompt_p1,
                     image_bytes=image_bytes,
                     json_mode=False,
-                    temperature=0.7 # Alta temperatura para criatividade
+                    temperature=0.7 # Criatividade alta para estratégia
                 )
                 if strategy_text:
                     logger.info("🧠 [Fase 1] Estratégia gerada com sucesso.")
-                    break 
+                    break # Sucesso na fase 1
             except Exception as e:
-                logger.warning(f"⚠️ Modelo {model} falhou. Tentando próximo...")
+                logger.warning(f"⚠️ Modelo {model} esgotado. Tentando próximo da lista...")
                 continue
         
         if not strategy_text:
-            # Fallback: Tenta usar o modelo de estruturação para pensar (melhor que nada)
+            # Fallback final: Tenta usar o modelo de estruturação para pensar (último recurso)
             try:
-                logger.warning("⚠️ Todos modelos Brain falharam. Usando fallback de formatação...")
+                logger.warning("⚠️ Todos modelos de raciocínio falharam. Usando fallback de formatação para pensar...")
                 strategy_text = AIOrchestrator._call_gemini_with_retry(
                     model_name=settings.STRUCTURING_MODELS[0],
                     prompt=context_prompt,
@@ -753,7 +894,7 @@ class AIOrchestrator:
                     temperature=0.7
                 )
             except Exception as e:
-                raise AIProcessingError(f"Falha catastrófica na IA (Fase 1): {e}")
+                raise AIProcessingError(f"Falha catastrófica na IA (Fase 1 - Brain): {e}")
 
         # --- FASE 2: ESTRUTURAÇÃO (Formatter) ---
         logger.info("⚡ [Fase 2 - Formatter] Iniciando Estruturação JSON...")
@@ -805,16 +946,15 @@ class AIOrchestrator:
                 prompt=prompt_p2,
                 image_bytes=None, 
                 json_mode=True, # Força modo JSON
-                temperature=0.0 # Temperatura Zero para precisão sintática
+                temperature=0.1 # Precisão máxima
             )
             data = JSONRepairKit.parse_robust(json_text)
             
-            # --- VALIDAÇÃO DE INTEGRIDADE ---
-            # Se o JSON vier vazio, lança erro para forçar retry ou logging
+            # VALIDAÇÃO DE INTEGRIDADE (Se vier vazio, força erro para retry ou fallback)
             if not data.get('dieta') or len(data['dieta']) == 0:
-                raise AIStructuringError("IA retornou lista de dieta vazia.")
+                raise AIStructuringError("IA retornou dieta vazia.")
             if not data.get('treino') or len(data['treino']) == 0:
-                raise AIStructuringError("IA retornou lista de treino vazia.")
+                raise AIStructuringError("IA retornou treino vazio.")
                 
             return data
             
@@ -843,159 +983,10 @@ class AIOrchestrator:
             return "Estou analisando seu treino... continue focado!"
 
 # ==============================================================================
-# SEÇÃO 11: HELPERS DE NEGÓCIO E OTIMIZAÇÃO
-# ==============================================================================
-
-class ImageProcessor:
-    """Processamento e otimização de imagens antes do envio para IA."""
-    
-    @staticmethod
-    def optimize(file_bytes: bytes, quality: int = 75, max_size: tuple = (800, 800)) -> bytes:
-        try:
-            with Image.open(io.BytesIO(file_bytes)) as img:
-                # Corrige orientação EXIF (comum em fotos de celular)
-                img = ImageOps.exif_transpose(img)
-                # Converte para RGB (necessário para salvar como JPEG)
-                if img.mode != 'RGB':
-                    img = img.convert("RGB")
-                # Resize inteligente
-                img.thumbnail(max_size)
-                
-                output = io.BytesIO()
-                img.save(output, format='JPEG', quality=quality, optimize=True)
-                return output.getvalue()
-        except Exception as e:
-            logger.error(f"Erro na otimização de imagem: {e}. Usando original.")
-            return file_bytes
-
-class PDFReport(FPDF):
-    """Gerador de relatórios PDF customizado."""
-    def __init__(self):
-        super().__init__()
-        self.set_auto_page_break(auto=True, margin=15)
-        self.col_bg = (20, 20, 25)
-        self.col_text = (230, 230, 230)
-        self.col_accent = (0, 200, 255)
-
-    def sanitize(self, txt: Any) -> str:
-        if not txt: return ""
-        s = str(txt).replace("’", "'").replace("–", "-")
-        # Garante compatibilidade Latin-1 do FPDF
-        return s.encode('latin-1', 'replace').decode('latin-1')
-
-    def header(self):
-        self.set_fill_color(*self.col_bg)
-        self.rect(0, 0, 210, 297, 'F')
-        self.set_font("Arial", "B", 20)
-        self.set_text_color(*self.col_accent)
-        self.cell(0, 10, "TECHNOBOLT PROTOCOL", 0, 1, 'C')
-        self.ln(10)
-
-    def chapter_title(self, label):
-        self.set_font("Arial", "B", 14)
-        self.set_text_color(*self.col_accent)
-        self.cell(0, 10, self.sanitize(label.upper()), 0, 1, 'L')
-        self.line(10, self.get_y(), 200, self.get_y())
-        self.ln(5)
-
-    def chapter_body(self, body):
-        self.set_font("Arial", "", 10)
-        self.set_text_color(*self.col_text)
-        self.multi_cell(0, 6, self.sanitize(body))
-        self.ln()
-    
-    def card(self, title, body):
-        self.set_fill_color(*self.col_card)
-        self.set_text_color(*self.col_azul)
-        self.set_font("Arial", "B", 11)
-        self.multi_cell(0, 6, self.sanitize(title), fill=True)
-        self.set_text_color(*self.col_texto)
-        self.set_font("Arial", "", 10)
-        self.multi_cell(0, 6, self.sanitize(body), fill=True)
-        self.ln(2)
-
-def normalizar_texto(texto: str) -> str:
-    if not texto: return ""
-    return "".join(c for c in unicodedata.normalize('NFD', str(texto)) if unicodedata.category(c) != 'Mn').lower().strip()
-
-def validar_exercicios_final(treino_data: list) -> list:
-    """
-    Validação final pós-IA.
-    Tenta casar nomes de exercícios gerados com pastas de imagens locais (Github).
-    """
-    db = ExerciseRepository.get_db()
-    if not treino_data or not db: return treino_data
-    
-    base_url = "[https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises](https://raw.githubusercontent.com/italoat/technobolt-backend/main/assets/exercises)"
-    
-    # Mapas de busca O(1)
-    db_map = {normalizar_texto(k): v for k, v in db.items()}
-    db_titles = {normalizar_texto(k): k for k, v in db.items()}
-
-    for dia in treino_data:
-        if 'exercicios' not in dia: continue
-        
-        corrected_exs = []
-        for ex in dia['exercicios']:
-            raw_name = ex.get('nome', 'Exercício Geral')
-            norm_name = normalizar_texto(raw_name)
-            
-            path = None
-            final_name = raw_name
-            
-            # 1. Match Exato
-            if norm_name in db_map:
-                path = db_map[norm_name]
-                final_name = db_titles[norm_name]
-            else:
-                # 2. Match por Similaridade
-                matches = difflib.get_close_matches(norm_name, db_map.keys(), n=1, cutoff=0.6)
-                if matches:
-                    path = db_map[matches[0]]
-                    final_name = db_titles[matches[0]]
-                else:
-                    # 3. Match por Substring
-                    for k in db_map.keys():
-                        if k in norm_name or norm_name in k:
-                            path = db_map[k]
-                            final_name = db_titles[k]
-                            break
-                    # 4. Fallback
-                    if not path and "polichinelo" in db_map:
-                        path = db_map["polichinelo"]
-                        final_name = f"{raw_name} (Adaptado)"
-
-            # Atualiza objeto
-            ex['nome'] = str(final_name).title()
-            if path:
-                ex['imagens_demonstracao'] = [
-                    f"{base_url}/{path}/0.jpg",
-                    f"{base_url}/{path}/1.jpg"
-                ]
-            else:
-                ex['imagens_demonstracao'] = []
-            
-            corrected_exs.append(ex)
-        
-        dia['exercicios'] = corrected_exs
-            
-    return treino_data
-
-def calcular_medalha(username: str) -> str:
-    try:
-        user = mongo_db.get_collection("usuarios").find_one({"usuario": username})
-        return "🥇" if user and user.get('pontos', 0) > 1000 else ""
-    except: return ""
-
-# ==============================================================================
 # SEÇÃO 12: APLICAÇÃO FASTAPI & ROTAS
 # ==============================================================================
 
-app = FastAPI(
-    title=settings.API_TITLE,
-    version=settings.API_VERSION,
-    description="Backend Enterprise da TechnoBolt. Arquitetura Chain-of-Thought (CoT) com Pipeline Bifásica e Blindagem Visual."
-)
+app = FastAPI(title=settings.API_TITLE, version=settings.API_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1005,9 +996,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ------------------------------------------------------------------------------
-# 1. AUTENTICAÇÃO E PERFIL
-# ------------------------------------------------------------------------------
+# --- ROTAS DE AUTENTICAÇÃO ---
 
 @app.post("/auth/login", tags=["Auth"])
 @sync_measure_time
@@ -1015,11 +1004,8 @@ def login(dados: UserLogin):
     col = mongo_db.get_collection("usuarios")
     user = col.find_one({"usuario": dados.usuario, "senha": dados.senha})
     
-    if not user:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Credenciais inválidas")
-    
-    if user.get("status") != "ativo" and not user.get("is_admin"):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Conta pendente de aprovação.")
+    if not user: raise HTTPException(401, "Credenciais inválidas")
+    if user.get("status") != "ativo" and not user.get("is_admin"): raise HTTPException(403, "Conta pendente.")
     
     return {
         "sucesso": True,
@@ -1043,19 +1029,8 @@ def login(dados: UserLogin):
 @app.post("/auth/registro", tags=["Auth"])
 def registrar(dados: UserRegister):
     col = mongo_db.get_collection("usuarios")
-    if col.find_one({"usuario": dados.usuario}):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Usuário já existe")
-    
-    new_user = dados.model_dump()
-    new_user.update({
-        "status": "pendente",
-        "avaliacoes_restantes": 0,
-        "pontos": 0,
-        "historico_dossies": [],
-        "is_admin": False,
-        "created_at": datetime.now()
-    })
-    col.insert_one(new_user)
+    if col.find_one({"usuario": dados.usuario}): raise HTTPException(400, "Usuário já existe")
+    col.insert_one({**dados.model_dump(), "status": "pendente", "avaliacoes_restantes": 0, "pontos": 0, "historico_dossies": [], "is_admin": False, "created_at": datetime.now()})
     return {"sucesso": True, "mensagem": "Registro realizado."}
 
 @app.post("/perfil/atualizar", tags=["Perfil"])
@@ -1068,21 +1043,14 @@ def atualizar_perfil(dados: UserUpdate):
         raise HTTPException(404, "Usuário não encontrado")
     return {"sucesso": True}
 
-# ------------------------------------------------------------------------------
-# 2. ANÁLISE E IA (CORE)
-# ------------------------------------------------------------------------------
+# --- ROTA CORE: ANÁLISE ---
 
 @app.post("/analise/executar", tags=["Analise"])
 @measure_time
 async def executar_analise(
-    usuario: str = Form(...),
-    nome_completo: str = Form(...),
-    peso: str = Form(...), 
-    altura: str = Form(...), 
-    objetivo: str = Form(...),
-    genero: str = Form("Masculino"),
-    observacoes: str = Form(""), 
-    foto: UploadFile = File(...)
+    usuario: str = Form(...), nome_completo: str = Form(...), peso: str = Form(...), 
+    altura: str = Form(...), objetivo: str = Form(...), genero: str = Form("Masculino"),
+    observacoes: str = Form(""), foto: UploadFile = File(...)
 ):
     logger.info(f"🚀 Iniciando análise completa para: {usuario}")
     
@@ -1101,7 +1069,7 @@ async def executar_analise(
         "genero": genero, "info_add": observacoes
     }})
     user_data = col.find_one({"usuario": usuario})
-    if not user_data: raise HTTPException(404, "Usuário não encontrado.")
+    if not user_data: raise HTTPException(404, "Usuário não encontrado durante a análise.")
 
     # 3. Processamento de Imagem
     raw_img = await foto.read()
@@ -1116,7 +1084,7 @@ async def executar_analise(
     RESTRICTIONS: {user_data.get('restricoes_fis')}, {user_data.get('restricoes_alim')}.
     
     TASKS:
-    1. ANALYZE PHYSIQUE from image.
+    1. ANALYZE PHYSIQUE from image (fat distribution, insertions).
     2. DIET (7 DAYS): Detailed menu for Monday-Sunday. Exact macros.
     3. TRAINING (7 DAYS): Monday-Sunday split. High Volume.
     4. SUPPLEMENTS: Evidence-based recommendations.
@@ -1172,8 +1140,10 @@ async def regenerar_secao(dados: dict = Body(...)):
     prompt = f"Regenerate ONLY the '{secao}' section for client {user.get('nome')}. Context: {dia if dia else 'Full Week'}. Make it HARDCORE and DETAILED. Minimum 10 exercises/meals per day."
     
     try:
+        # Usa CoT sem imagem para regeneração rápida
         new_content = AIOrchestrator.execute_chain_of_thought(prompt, None)
         
+        # Merge no último dossiê
         last_dossie = user['historico_dossies'][-1]
         json_full = last_dossie['conteudo_bruto']['json_full']
         
@@ -1193,15 +1163,19 @@ async def regenerar_secao(dados: dict = Body(...)):
     except:
         return {"sucesso": False}
 
-# ------------------------------------------------------------------------------
-# 3. HISTÓRICO LEGADO
-# ------------------------------------------------------------------------------
+# --- ROTA LEGADA PARA HISTÓRICO (PREVENÇÃO DE CRASH) ---
 
 @app.get("/historico/{usuario}", tags=["Perfil"])
 def buscar_historico(usuario: str):
+    """
+    Retorna o histórico completo e perfil atualizado.
+    Rota crucial para evitar 'Exception not Found' no carregamento do app Flutter.
+    """
     col = mongo_db.get_collection("usuarios")
     user = col.find_one({"usuario": usuario})
-    if not user: return {"sucesso": True, "historico": []}
+    if not user: 
+        # Retorna estrutura vazia válida em vez de 404 para não crashar o app
+        return {"sucesso": True, "historico": []}
     
     return {
         "sucesso": True, 
@@ -1219,9 +1193,7 @@ def buscar_historico(usuario: str):
         }
     }
 
-# ------------------------------------------------------------------------------
-# 4. REDE SOCIAL
-# ------------------------------------------------------------------------------
+# --- ROTAS SOCIAIS ---
 
 @app.get("/social/feed", tags=["Social"])
 def get_feed():
@@ -1233,11 +1205,16 @@ def get_feed():
     return {"sucesso": True, "feed": posts}
 
 @app.post("/social/postar", tags=["Social"])
-async def postar(usuario: str = Form(...), legenda: str = Form(...), imagem: UploadFile = File(...)):
+async def postar(
+    usuario: str = Form(...), 
+    legenda: str = Form(...), 
+    imagem: UploadFile = File(...)
+):
     img_bytes = await imagem.read()
     img_opt = ImageService.optimize(img_bytes, size=(600, 600))
     
-    cmt = AIOrchestrator.simple_generation(f"Comentário curto e motivador (gym bro) para: {legenda}", img_opt)
+    # Comentário rápido automático
+    cmt = AIOrchestrator.simple_generation(f"Gere um comentário curto, gíria maromba, motivador para esta legenda: '{legenda}'", img_opt)
     
     col = mongo_db.get_collection("posts")
     col.insert_one({
@@ -1278,9 +1255,7 @@ def postar_comentario(dados: SocialCommentRequest):
     col.update_one({"_id": ObjectId(dados.post_id)}, {"$push": {"comentarios": cmt}})
     return {"sucesso": True}
 
-# ------------------------------------------------------------------------------
-# 5. GAMIFICAÇÃO & VISION AI
-# ------------------------------------------------------------------------------
+# --- GAMIFICAÇÃO & VISION AI ---
 
 @app.get("/social/ranking", tags=["Social"])
 def get_ranking():
@@ -1309,6 +1284,7 @@ async def validar_conquista(
     tipo: str = Form(...), 
     foto: UploadFile = File(...)
 ):
+    """Valida checkin via IA de Visão."""
     col = mongo_db.get_collection("checkins")
     now = datetime.now()
     today_start = datetime(now.year, now.month, now.day).isoformat()
@@ -1319,7 +1295,8 @@ async def validar_conquista(
     content = await foto.read()
     img_opt = ImageService.optimize(content)
     
-    resp = AIOrchestrator.simple_generation(f"Valide se esta imagem comprova um treino de {tipo}. Responda APROVADO ou REPROVADO.", img_opt)
+    # Usa modelo rápido para validação binária (Sim/Não)
+    resp = AIOrchestrator.simple_generation(f"Analise esta imagem. Ela comprova um treino de {tipo} ou presença em academia? Responda APENAS 'APROVADO' ou 'REPROVADO'.", img_opt)
     
     if resp and "APROVADO" in resp.upper():
         pts = 50
@@ -1327,11 +1304,9 @@ async def validar_conquista(
         mongo_db.get_collection("usuarios").update_one({"usuario": usuario}, {"$inc": {"pontos": pts}})
         return {"sucesso": True, "aprovado": True, "pontos": pts}
     else:
-        return {"sucesso": True, "aprovado": False, "mensagem": "Não foi possível validar o treino."}
+        return {"sucesso": True, "aprovado": False, "mensagem": "Não foi possível validar o treino pela imagem."}
 
-# ------------------------------------------------------------------------------
-# 6. CHAT & ADMIN
-# ------------------------------------------------------------------------------
+# --- CHAT & ADMIN ---
 
 @app.get("/chat/mensagens", tags=["Chat"])
 def get_msgs(user1: str, user2: str):
@@ -1376,12 +1351,10 @@ def admin_del(dados: AdminUserEdit):
 def create_admin():
     col = mongo_db.get_collection("usuarios")
     if col.find_one({"usuario": "admin"}): return {"sucesso": False, "mensagem": "Admin existe."}
-    col.insert_one({"usuario": "admin", "senha": "123", "nome": "Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999})
+    col.insert_one({"usuario": "admin", "senha": "123", "nome": "Super Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999})
     return {"sucesso": True}
 
-# ------------------------------------------------------------------------------
-# 7. EXPORTAÇÃO PDF
-# ------------------------------------------------------------------------------
+# --- PDF ---
 
 @app.get("/analise/baixar-pdf/{usuario}", tags=["Export"])
 def download_pdf(usuario: str):
