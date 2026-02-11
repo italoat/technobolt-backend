@@ -105,10 +105,7 @@ from fpdf import FPDF
 # ==============================================================================
 
 class RequestContext:
-    """
-    Context manager for request-scoped data.
-    Ensures that every log message can be traced back to a specific user request.
-    """
+    """Stores context for the current request execution flow."""
     _request_id: str = "system-startup"
 
     @classmethod
@@ -122,12 +119,12 @@ class RequestContext:
 class EnterpriseLogger:
     """
     Structured logging system designed for high-concurrency production environments.
-    Ensures every log entry is traceable to a specific request ID and provides standardized formatting.
+    Ensures every log entry is traceable to a specific request ID.
     """
     
     @staticmethod
     def setup() -> logging.Logger:
-        """Configures the root logger with custom formatting and stream handling."""
+        """Configures the root logger with custom formatting."""
         logger = logging.getLogger("TechnoBoltAPI")
         logger.setLevel(logging.INFO)
         
@@ -165,7 +162,6 @@ def initialize_media_drivers():
     """
     Registers external codecs for image processing.
     Crucial for handling HEIC uploads from iOS devices in the Flutter app.
-    This runs once at startup.
     """
     try:
         logger.info("🔧 Initializing Pillow HEIF opener...")
@@ -207,7 +203,7 @@ class Settings:
         
         # API Metadata
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "2026.5.3-Titanium-Max-Ultra"
+        self.API_VERSION = "121.0-Architect"
         self.ENV = self._get_env("ENV", "production")
         
         # AI Configuration (Load Balancer Pool)
@@ -220,10 +216,6 @@ class Settings:
             "models/gemini-2.5-flash",        # Secondary: Stability
             "models/gemini-2.0-flash",        # Tertiary: Fallback
             "models/gemini-flash-latest"      # Quaternary: Last Resort
-        ]
-        
-        self.AI_STRUCTURE_MODELS = [
-            "models/gemini-flash-latest"
         ]
         
         logger.info(f"🧠 AI Priority Chain Loaded: {len(self.AI_MODELS_PRIORITY)} models active.")
@@ -284,6 +276,11 @@ class AIStructuringError(BaseAPIException):
     """Raised when the AI 'Formatter' phase fails to produce valid JSON."""
     def __init__(self, details: str = ""):
         super().__init__("AI Structuring Engine failed to parse JSON output.", 502, details)
+        
+class AIProcessingError(BaseAPIException):
+    """Raised when all AI models or keys fail to produce a valid result."""
+    def __init__(self, details: str = ""):
+        super().__init__(f"Critical AI Pipeline Failure: {details}", 500, details)
 
 class ResourceNotFoundError(BaseAPIException):
     """Raised when a requested resource (User, Post) is missing."""
@@ -890,29 +887,25 @@ class AIOrchestrator:
                 # --- PHASE 1: REASONING (The Brain) ---
                 logger.info(f"🧠 [Phase 1 - Reasoning] Running on {model}...")
                 
-                # UPDATE 1: Enhanced Physical Assessment & Caloric Surplus Logic
+                # UPDATE 1: Expert Persona, Volume Elevation & Detailed Justification
                 prompt_p1 = context_prompt + """
-                \n\nCRITICAL INSTRUCTION: Act as a WORLD-CLASS PERSONAL TRAINER & SPORTS SCIENTIST. 
-                Generate a HIGHLY DETAILED, VERBOSE text strategy. Do not output JSON yet. 
+                \n\nCRITICAL INSTRUCTION: Act as a PhD SPORTS SCIENTIST with 20+ years of specialization in Hypertrophy and Strength.
+                Generate a HIGHLY DETAILED, VERBOSE text strategy. Do not output JSON yet.
                 
-                1. VISUAL ASSESSMENT (MANDATORY & DETAILED):
-                   - Analyze posture (kyphosis, lordosis, head tilt).
-                   - Analyze symmetry (left vs right, upper vs lower).
-                   - Estimate Body Fat % visually.
-                   - Identify weak muscle groups that need prioritization.
-                   - DO NOT return generic advice. Use the image data.
+                1. VISUAL ASSESSMENT:
+                   - Analyze biomechanics, bone structure, insertion points and asymmetries.
+                   - Estimate Body Fat %.
                 
-                2. DIET & CALORIC SURPLUS (HYPERTROPHY FOCUSED):
-                   - Calculate Basal Metabolic Rate (BMR) and Total Daily Energy Expenditure (TDEE).
-                   - Explicitly state the daily caloric surplus target (e.g., +300-500kcal).
-                   - Break down macros: Protein (high), Carbs (moderate/high), Fats (moderate).
-                   - Show the math: BMR + Activity + Surplus = Total Calories.
+                2. DIET & CALORIC SURPLUS:
+                   - Explicitly state TARGET SURPLUS (e.g., +400kcal).
+                   - Calculate specific macro splits (Protein/Carbs/Fats).
+                   - Explain the metabolic logic.
                 
-                3. TRAINING OPTIMIZATION (HIGH VOLUME & JUSTIFICATION):
-                   - MONDAY (Chest Focus): High volume (10-12 exercises).
-                   - OTHER DAYS: High volume (10+ exercises per session). NO "Repeat Monday".
-                   - EXERCISE JUSTIFICATION: For EVERY single exercise, explain explicitly WHY it was chosen based on biomechanics and the user's physique (e.g., "Chosen to target the clavicular head...").
-                   - Progressive Overload strategy must be clear.
+                3. TRAINING OPTIMIZATION (HIGH FREQUENCY & VOLUME):
+                   - EXTREME VOLUME REQUIRED: Every single workout day MUST have at least 10-12 exercises to maximize metabolic stress and mechanical tension.
+                   - INTENSITY: Focus on high metabolic stress and mechanical tension.
+                   - EXERCISE JUSTIFICATION: For EVERY exercise, provide a concise but scientific biomechanical reason (e.g., "Incline Press targets clavicular fibers to fill upper shelf...").
+                   - Ensure the volume is elevated EVERY DAY (Mon-Sun).
                 """
                 
                 strategy_text = AIOrchestrator._call_gemini_with_retry(
@@ -924,12 +917,11 @@ class AIOrchestrator:
                 )
                 
                 # --- PHASE 2: FORMATTING (The Structurer) ---
-                # We use the SAME model to ensure capability consistency
                 logger.info(f"⚡ [Phase 2 - Formatting] Running on {model}...")
                 
                 exercise_list_str = ExerciseRepository.get_keys_string()
                 
-                # UPDATE 2: Strict JSON Schema Enforcement with new fields
+                # UPDATE 2: Strict JSON Schema Enforcement
                 prompt_p2 = f"""
                 TASK: Act as a Strict JSON Compiler.
                 Convert the following Fitness Strategy into VALID JSON matching the schema.
@@ -939,94 +931,54 @@ class AIOrchestrator:
                 
                 CONSTRAINTS:
                 1. Output ONLY pure JSON.
-                2. DATA INTEGRITY:
-                   - 'dieta': Must contain 7 objects (Monday-Sunday). Include 'superavit_calorico' field.
-                   - 'treino': Must contain 7 objects (Monday-Sunday).
-                   - 'suplementacao': Must not be empty.
-                3. VALIDATION: Map exercises to: [{exercise_list_str}]. Use closest match or "(Adaptado)".
+                2. DATA INTEGRITY: 'dieta' & 'treino' must have 7 objects each. 'suplementacao' required.
+                3. EXERCISE COUNT: Ensure 10+ exercises per day in the JSON.
+                4. VALIDATION: Map to: [{exercise_list_str}].
                 
-                REQUIRED SCHEMA:
+                SCHEMA:
                 {{
-                  "avaliacao": {{ 
-                      "segmentacao": {{ "tronco": "Txt", "superior": "Txt", "inferior": "Txt" }}, 
-                      "dobras": {{ "abdominal": "Txt", "suprailiaca": "Txt", "peitoral": "Txt" }}, 
-                      "analise_postural": "Txt", 
-                      "simetria": "Txt", 
-                      "estimativa_gordura": "Txt",
-                      "pontos_fracos": "Txt",
-                      "insight": "Txt" 
-                  }},
-                  "dieta": [ 
-                    {{ 
-                      "dia": "Segunda", 
-                      "foco_nutricional": "Txt", 
-                      "superavit_calorico": "Txt",
-                      "calculo_calorico": "Txt",
-                      "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ], 
-                      "macros_totais": "Txt" 
-                    }}, 
-                    ... 
-                  ],
-                  "dieta_insight": "Txt",
+                  "avaliacao": {{ "segmentacao": {{...}}, "dobras": {{...}}, "analise_postural": "...", "simetria": "...", "estimativa_gordura": "...", "insight": "..." }},
+                  "dieta": [ {{ "dia": "Segunda", "foco_nutricional": "...", "superavit_calorico": "...", "calculo_calorico": "...", "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ], "macros_totais": "..." }}, ... ],
+                  "dieta_insight": "...",
                   "suplementacao": [ {{ "nome": "...", "dose": "...", "horario": "...", "motivo": "..." }} ],
-                  "suplementacao_insight": "Txt",
+                  "suplementacao_insight": "...",
                   "treino": [ 
                      {{ 
-                        "dia": "Segunda", 
-                        "foco": "...", 
-                        "exercicios": [ 
-                            {{ "nome": "...", "series_reps": "...", "execucao": "...", "justificativa_biomecanica": "Txt" }} 
-                        ], 
-                        "treino_alternativo": "...", 
-                        "justificativa": "..." 
-                     }},
-                     ...
+                        "dia": "Segunda", "foco": "...", 
+                        "exercicios": [ {{ "nome": "...", "series_reps": "...", "execucao": "...", "justificativa_biomecanica": "..." }} ], 
+                        "treino_alternativo": "...", "justificativa": "..." 
+                     }}, ...
                   ],
-                  "treino_insight": "Txt"
+                  "treino_insight": "..."
                 }}
                 """
                 
                 json_text = AIOrchestrator._call_gemini_with_retry(
-                    model_name=model,
-                    prompt=prompt_p2,
-                    image_bytes=None, 
-                    json_mode=True,
-                    temperature=0.0 # Strict mode
+                    model_name=model, prompt=prompt_p2, image_bytes=None, json_mode=True, temperature=0.0
                 )
                 
-                # Parse & Validate
                 data = JSONRepairKit.parse_robust(json_text)
-                
-                if not data.get('dieta') or len(data['dieta']) < 1:
-                    raise ValueError("Generated diet list is empty.")
-                
-                return data # Success!
+                if not data.get('dieta') or len(data['dieta']) < 1: raise ValueError("Empty diet.")
+                return data 
                 
             except Exception as e:
-                logger.warning(f"⚠️ Pipeline Failed for {model}: {e}. Failing over to next model...")
-                continue # Try next model
-                
-        # If we get here, all models failed
-        raise AIProcessingError("All AI models failed to generate valid protocol.")
+                logger.warning(f"⚠️ Pipeline Failed: {e}. Trying next model...")
+                continue 
+        
+        raise AIProcessingError("All AI models failed.")
 
     @staticmethod
     def simple_generation(prompt: str, image_bytes: Optional[bytes] = None) -> str:
-        """Fast generation for comments/validation."""
         for model in settings.AI_MODELS_PRIORITY:
-            try:
-                return AIOrchestrator._call_gemini_with_retry(model, prompt, image_bytes, False)
+            try: return AIOrchestrator._call_gemini_with_retry(model, prompt, image_bytes, False)
             except: continue
-        return "Analysis in progress..."
+        return "Processing..."
 
 # ==============================================================================
 # SECTION 11: FASTAPI APPLICATION & ROUTES
 # ==============================================================================
 
-app = FastAPI(
-    title=settings.API_TITLE, 
-    version=settings.API_VERSION,
-    description="The Core Neural Backend for TechnoBolt."
-)
+app = FastAPI(title=settings.API_TITLE, version=settings.API_VERSION, description="TechnoBolt Core")
 
 app.add_middleware(
     CORSMiddleware,
@@ -1043,39 +995,21 @@ app.add_middleware(
 @app.post("/auth/login", tags=["Authentication"])
 @sync_measure_time
 def login_endpoint(dados: UserLogin):
-    """Authenticates a user and returns their profile."""
     col = mongo_db.get_collection("usuarios")
     user = col.find_one({"usuario": dados.usuario, "senha": dados.senha})
-    
-    if not user:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials.")
-    if user.get("status") != "ativo" and not user.get("is_admin"):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account pending approval.")
-    
-    user_data = {k: v for k, v in user.items() if k != "_id"}
-    return {"sucesso": True, "dados": user_data}
+    if not user: raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid credentials.")
+    if user.get("status") != "ativo" and not user.get("is_admin"): raise HTTPException(status.HTTP_403_FORBIDDEN, "Pending.")
+    return {"sucesso": True, "dados": {k: v for k, v in user.items() if k != "_id"}}
 
 @app.post("/auth/registro", tags=["Authentication"])
 def register_endpoint(dados: UserRegister):
-    """Registers a new user."""
     col = mongo_db.get_collection("usuarios")
-    if col.find_one({"usuario": dados.usuario}):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Username already exists.")
-    
-    new_user = dados.model_dump()
-    new_user.update({
-        "status": "pendente",
-        "avaliacoes_restantes": 0,
-        "pontos": 0,
-        "historico_dossies": [],
-        "is_admin": False,
-        "created_at": datetime.now()
-    })
-    col.insert_one(new_user)
-    return {"sucesso": True, "mensagem": "Registration successful."}
+    if col.find_one({"usuario": dados.usuario}): raise HTTPException(400, "Exists.")
+    col.insert_one({**dados.model_dump(), "status": "pendente", "avaliacoes_restantes": 0, "pontos": 0, "historico_dossies": [], "is_admin": False, "created_at": datetime.now()})
+    return {"sucesso": True}
 
 # ------------------------------------------------------------------------------
-# ROUTE GROUP: CORE ANALYSIS (THE BRAIN)
+# ROUTE GROUP: CORE ANALYSIS
 # ------------------------------------------------------------------------------
 
 @app.post("/analise/executar", tags=["Analysis"])
@@ -1085,61 +1019,41 @@ async def execute_analysis_endpoint(
     altura: str = Form(...), objetivo: str = Form(...), genero: str = Form("Masculino"),
     observacoes: str = Form(""), foto: UploadFile = File(...)
 ):
-    """
-    Main AI Entrypoint.
-    1. Updates user metrics.
-    2. Processes user photo.
-    3. Triggers Chain-of-Thought AI Pipeline.
-    4. Saves results and deducts credits.
-    """
-    logger.info(f"🚀 Launching Analysis for {usuario}...")
-    
-    # 1. Metric Parsing
+    logger.info(f"🚀 Analysis: {usuario}")
     try:
         p_float = float(str(peso).replace(',', '.'))
-        alt_raw = str(altura).replace(',', '.').strip()
-        alt_int = int(float(alt_raw) * 100) if float(alt_raw) < 3.0 else int(float(alt_raw))
-    except:
-        p_float = 70.0; alt_int = 175
+        alt_int = int(float(str(altura).replace(',', '.').strip()) * 100) if float(str(altura).replace(',', '.').strip()) < 3.0 else int(float(str(altura).replace(',', '.').strip()))
+    except: p_float = 70.0; alt_int = 175
     
-    # 2. User Update
     col = mongo_db.get_collection("usuarios")
-    col.update_one({"usuario": usuario}, {"$set": {
-        "nome": nome_completo, "peso": p_float, "altura": alt_int, 
-        "genero": genero, "info_add": observacoes
-    }})
+    col.update_one({"usuario": usuario}, {"$set": {"nome": nome_completo, "peso": p_float, "altura": alt_int, "genero": genero, "info_add": observacoes}})
     user = col.find_one({"usuario": usuario})
-    if not user: raise HTTPException(404, "User not found.")
+    if not user: raise HTTPException(404)
 
-    # 3. Image Processing
-    raw_img = await foto.read()
-    img_opt = ImageService.optimize(raw_img)
+    img = await foto.read()
+    img_opt = ImageService.optimize(img)
     
-    # 4. Prompt Construction - UPDATE: More aggressive instruction
+    # Prompt Refined for Expert Persona
     prompt = f"""
-    ACT AS AN ELITE SPORTS SCIENTIST.
+    ACT AS AN ELITE SPORTS SCIENTIST (PhD).
     SUBJECT: {nome_completo} ({genero}), {p_float}kg, {alt_int}cm.
     GOAL: {objetivo}. 
     RESTRICTIONS: {user.get('restricoes_fis', 'None')}, {user.get('restricoes_alim', 'None')}.
     TASKS: 
-    1. Visual Assessment (Be critical, look for symmetries).
-    2. Diet for Hypertrophy (Surplus required, show math).
-    3. High Volume Training (Maximize Monday, justify exercises).
-    4. Advanced Supplementation.
+    1. Visual Assessment (Strict biomechanical analysis).
+    2. Hypertrophy Diet (Surplus Required, show math).
+    3. High Volume Training (10-12 exercises EVERY DAY).
+    4. Evidence-based Supplementation.
     """
     
-    # 5. AI Execution
     try:
         result = AIOrchestrator.execute_chain_of_thought(prompt, img_opt)
     except Exception as e:
-        logger.error(f"AI Pipeline Failed: {e}")
-        raise HTTPException(503, "AI Service Overload. Please try again.")
+        logger.error(f"AI Fail: {e}")
+        raise HTTPException(503, "AI Overload.")
 
-    # 6. Post-Processing
-    if 'treino' in result:
-        result['treino'] = validar_exercicios_final(result['treino'])
+    if 'treino' in result: result['treino'] = validar_exercicios_final(result['treino'])
 
-    # 7. Persistence
     dossie = {
         "id": str(ObjectId()),
         "data": datetime.now().strftime("%d/%m/%Y %H:%M"),
@@ -1153,55 +1067,41 @@ async def execute_analysis_endpoint(
         }
     }
     
-    update_op = {"$push": {"historico_dossies": dossie}}
-    if not user.get('is_admin'):
-        update_op["$inc"] = {"avaliacoes_restantes": -1}
-        
-    col.update_one({"usuario": usuario}, update_op)
-    
+    upd = {"$push": {"historico_dossies": dossie}}
+    if not user.get('is_admin'): upd["$inc"] = {"avaliacoes_restantes": -1}
+    col.update_one({"usuario": usuario}, upd)
     return {"sucesso": True, "resultado": dossie}
 
 @app.post("/analise/regenerar-secao", tags=["Analysis"])
 async def regenerate_section_endpoint(dados: dict = Body(...)):
-    """Regenerates a specific section of the protocol."""
     col = mongo_db.get_collection("usuarios")
     user = col.find_one({"usuario": dados.get("usuario")})
     if not user: return {"sucesso": False}
     
-    prompt = f"Regenerate ONLY the '{dados.get('secao')}' section for {user.get('nome')}. Context: {dados.get('dia')}. Make it intense and detailed."
+    prompt = f"Regenerate '{dados.get('secao')}' for {user.get('nome')}. MAX VOLUME & INTENSITY."
     try:
         new_content = AIOrchestrator.execute_chain_of_thought(prompt, None)
-        # Merging logic...
         last_dossie = user['historico_dossies'][-1]
         last_dossie['conteudo_bruto']['json_full'][dados.get('secao')] = new_content[dados.get('secao')]
-        
-        col.update_one(
-            {"usuario": dados.get("usuario"), "historico_dossies.data": last_dossie['data']},
-            {"$set": {"historico_dossies.$.conteudo_bruto.json_full": last_dossie['conteudo_bruto']['json_full']}}
-        )
+        col.update_one({"usuario": dados.get("usuario"), "historico_dossies.data": last_dossie['data']},
+            {"$set": {"historico_dossies.$.conteudo_bruto.json_full": last_dossie['conteudo_bruto']['json_full']}})
         return {"sucesso": True, "resultado": last_dossie}
     except: return {"sucesso": False}
 
 @app.get("/analise/baixar-pdf/{usuario}", tags=["Analysis"])
 def download_pdf_endpoint(usuario: str):
-    """Generates a PDF report."""
     try:
         user = mongo_db.get_collection("usuarios").find_one({"usuario": usuario})
         if not user: raise HTTPException(404)
-        
         data = user['historico_dossies'][-1]['conteudo_bruto']['json_full']
         pdf = PDFReport()
-        pdf.add_page()
-        pdf.chapter_title(f"RELATORIO: {user.get('nome')}")
-        
+        pdf.add_page(); pdf.chapter_title(f"RELATORIO: {user.get('nome')}")
         if 'dieta' in data:
             pdf.chapter_title("DIETA")
             for d in data['dieta']: pdf.card(d['dia'], str(d.get('refeicoes')))
-            
         buf = io.BytesIO()
         out = pdf.output(dest='S').encode('latin-1', 'replace')
-        buf.write(out)
-        buf.seek(0)
+        buf.write(out); buf.seek(0)
         return StreamingResponse(buf, media_type="application/pdf", headers={'Content-Disposition': 'attachment; filename="report.pdf"'})
     except: raise HTTPException(500)
 
@@ -1219,7 +1119,6 @@ def update_profile_endpoint(dados: UserUpdate):
 
 @app.get("/historico/{usuario}", tags=["Profile"])
 def get_history_endpoint(usuario: str):
-    """Legacy endpoint for app compatibility."""
     user = mongo_db.get_collection("usuarios").find_one({"usuario": usuario})
     if not user: return {"sucesso": True, "historico": []}
     return {
@@ -1240,17 +1139,12 @@ def get_feed_endpoint():
     return {"sucesso": True, "feed": posts}
 
 @app.post("/social/postar", tags=["Social"])
-async def create_post_endpoint(
-    usuario: str = Form(...), legenda: str = Form(...), imagem: UploadFile = File(...)
-):
+async def create_post_endpoint(usuario: str = Form(...), legenda: str = Form(...), imagem: UploadFile = File(...)):
     img = ImageService.optimize(await imagem.read())
-    cmt = AIOrchestrator.simple_generation(f"Comment like a gym bro: {legenda}", img)
-    
+    cmt = AIOrchestrator.simple_generation(f"Gym bro comment: {legenda}", img)
     mongo_db.get_collection("posts").insert_one({
-        "autor": usuario, "legenda": legenda, 
-        "imagem": base64.b64encode(img).decode('utf-8'),
-        "data": datetime.now().isoformat(), "likes": [], 
-        "comentarios": [{"autor": "TechnoBolt AI", "texto": cmt}]
+        "autor": usuario, "legenda": legenda, "imagem": base64.b64encode(img).decode('utf-8'),
+        "data": datetime.now().isoformat(), "likes": [], "comentarios": [{"autor": "TechnoBolt AI", "texto": cmt}]
     })
     return {"sucesso": True}
 
@@ -1266,10 +1160,7 @@ def like_post_endpoint(dados: SocialPostRequest):
 
 @app.post("/social/comentar", tags=["Social"])
 def comment_post_endpoint(dados: SocialCommentRequest):
-    mongo_db.get_collection("posts").update_one(
-        {"_id": ObjectId(dados.post_id)}, 
-        {"$push": {"comentarios": {"autor": dados.usuario, "texto": dados.texto, "data": datetime.now().isoformat()}}}
-    )
+    mongo_db.get_collection("posts").update_one({"_id": ObjectId(dados.post_id)}, {"$push": {"comentarios": {"autor": dados.usuario, "texto": dados.texto, "data": datetime.now().isoformat()}}})
     return {"sucesso": True}
 
 @app.post("/social/post/deletar", tags=["Social"])
@@ -1288,16 +1179,12 @@ def get_checkins_endpoint(usuario: str):
     return {"sucesso": True, "checkins": {datetime.fromisoformat(c['data']).day: c['tipo'] for c in raw}}
 
 @app.post("/social/validar-conquista", tags=["Gamification"])
-async def validate_checkin_endpoint(
-    usuario: str = Form(...), tipo: str = Form(...), foto: UploadFile = File(...)
-):
+async def validate_checkin_endpoint(usuario: str = Form(...), tipo: str = Form(...), foto: UploadFile = File(...)):
     now = datetime.now()
     if mongo_db.get_collection("checkins").find_one({"usuario": usuario, "data": {"$gte": datetime(now.year, now.month, now.day).isoformat()}}):
-        return {"sucesso": False, "mensagem": "Checkin already done today."}
-    
+        return {"sucesso": False, "mensagem": "Checkin done."}
     img = ImageService.optimize(await foto.read())
-    resp = AIOrchestrator.simple_generation(f"Is this a {tipo} workout? Reply APPROVED or REJECTED.", img)
-    
+    resp = AIOrchestrator.simple_generation(f"Is this {tipo}? APPROVED/REJECTED.", img)
     if "APROVADO" in resp.upper():
         mongo_db.get_collection("checkins").insert_one({"usuario": usuario, "tipo": tipo, "data": now.isoformat(), "pontos": 50})
         mongo_db.get_collection("usuarios").update_one({"usuario": usuario}, {"$inc": {"pontos": 50}})
