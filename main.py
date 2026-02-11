@@ -1,9 +1,9 @@
 """
 TechnoBolt Gym Hub API - Enterprise Architect Edition
-Version: 2026.5.2-Titanium-Max-Ultra
+Version: 2026.5.3-Titanium-Max-Ultra
 Architecture: Modular Monolith | Hexagonal-ish | Event-Driven AI Pipeline
 Author: TechnoBolt Engineering Team (Principal Architect)
-Timestamp: 2026-02-11 17:30:00 UTC
+Timestamp: 2026-02-11 17:45:00 UTC
 
 System Overview:
 This backend serves as the central nervous system for the TechnoBolt ecosystem.
@@ -207,7 +207,7 @@ class Settings:
         
         # API Metadata
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "2026.5.2-Titanium-Max-Ultra"
+        self.API_VERSION = "2026.5.3-Titanium-Max-Ultra"
         self.ENV = self._get_env("ENV", "production")
         
         # AI Configuration (Load Balancer Pool)
@@ -890,10 +890,10 @@ class AIOrchestrator:
                 # --- PHASE 1: REASONING (The Brain) ---
                 logger.info(f"🧠 [Phase 1 - Reasoning] Running on {model}...")
                 
-                # UPDATE 1: Enhanced Physical Assessment, Caloric Surplus, and Training Volume
+                # UPDATE 1: Enhanced Physical Assessment & Caloric Surplus Logic
                 prompt_p1 = context_prompt + """
-                \n\nCRITICAL INSTRUCTION: Think step-by-step. Generate a HIGHLY DETAILED, VERBOSE text strategy. 
-                Do not output JSON yet. Focus on:
+                \n\nCRITICAL INSTRUCTION: Act as a WORLD-CLASS PERSONAL TRAINER & SPORTS SCIENTIST. 
+                Generate a HIGHLY DETAILED, VERBOSE text strategy. Do not output JSON yet. 
                 
                 1. VISUAL ASSESSMENT (MANDATORY & DETAILED):
                    - Analyze posture (kyphosis, lordosis, head tilt).
@@ -908,10 +908,10 @@ class AIOrchestrator:
                    - Break down macros: Protein (high), Carbs (moderate/high), Fats (moderate).
                    - Show the math: BMR + Activity + Surplus = Total Calories.
                 
-                3. TRAINING OPTIMIZATION (HIGH VOLUME - MAXIMIZE MONDAY):
-                   - MONDAY (International Chest Day/Focus Day): Must be the highest volume day. Aim for 10-12 exercises.
-                   - OTHER DAYS: Maintain high volume (8-10 exercises), but slightly less than Monday.
-                   - BIOMECHANICAL JUSTIFICATION: For EVERY exercise, explain WHY it was chosen (e.g., 'Incline Dumbbell Press chosen to target the clavicular head of the pectoralis major...').
+                3. TRAINING OPTIMIZATION (HIGH VOLUME & JUSTIFICATION):
+                   - MONDAY (Chest Focus): High volume (10-12 exercises).
+                   - OTHER DAYS: High volume (10+ exercises per session). NO "Repeat Monday".
+                   - EXERCISE JUSTIFICATION: For EVERY single exercise, explain explicitly WHY it was chosen based on biomechanics and the user's physique (e.g., "Chosen to target the clavicular head...").
                    - Progressive Overload strategy must be clear.
                 """
                 
