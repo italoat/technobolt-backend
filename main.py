@@ -1,13 +1,19 @@
 """
-TechnoBolt Gym Hub API - Enterprise Edition (Titanium-Final-Patch-Integral)
-Version: 119.0-Production-Stable
-Architecture: Hexagonal-ish with Chain-of-Thought AI Pipeline & Multi-Level Rotation
+TechnoBolt Gym Hub API - Enterprise Edition (Titanium-Max-Integrity-Final)
+Version: 121.0-Production-Release
+Architecture: Hexagonal-ish with Unified Chain-of-Thought & Deep Key Rotation
 Author: TechnoBolt Engineering Team (Senior Lead)
 Timestamp: 2026-02-11
 
 Description:
 This API serves as the backend for the TechnoBolt Gym Hub application.
-FIXED: JSONRepairKit Attribute Error, JSON Delimiter Logic, ImageService Scope & Full Route Integrity.
+It integrates MongoDB for persistence, Google Gemini for Generative AI (Text & Vision),
+and provides endpoints for Social features, Gamification, and Admin management.
+
+CORE STRATEGY:
+- Unified Model Execution: Uses the SAME AI model for both Reasoning (Phase 1) and Formatting (Phase 2) to ensure context consistency.
+- Deep Key Rotation: Iterates through all available API Keys for the current model before failing over to the next model priority.
+- Robust Error Handling: Granular try/except blocks, custom exceptions, and detailed logging.
 """
 
 import os
@@ -92,6 +98,7 @@ class EnterpriseLogger:
     """
     Configura um sistema de logging estruturado capaz de rastrear transações
     e erros críticos em ambiente de produção de alta escala.
+    Implementa rotação de logs, formatação padrão ISO-8601 e separação de streams.
     """
     
     @staticmethod
@@ -171,29 +178,23 @@ class Settings:
         
         # --- Metadados da API ---
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "118.0-Production-Stable"
+        self.API_VERSION = "121.0-Production-Unified"
         self.ENV = self._get_env("ENV", "production")
         
         # --- Configurações de IA (Load Balancer) ---
         self.GEMINI_KEYS = self._load_api_keys()
         
-        # --- Definição Estratégica de Modelos (Chain of Thought) ---
-        # MANTIDOS EXATAMENTE COMO SOLICITADO
-        
-        # FASE 1: BRAIN (RACIOCÍNIO)
-        self.REASONING_MODELS = [
-            "models/gemini-3-flash-preview",  # Tier 1
-            "models/gemini-2.5-flash",        # Tier 2
-            "models/gemini-2.0-flash"         # Tier 3
+        # --- Definição Estratégica de Modelos (Unified Priority List) ---
+        # Estratégia: Usar o mesmo modelo para Fase 1 e 2 para manter consistência.
+        # Só muda de modelo se TODAS as chaves falharem para o modelo atual.
+        self.AI_MODELS_PRIORITY = [
+            "models/gemini-3-flash-preview",  # Prioridade 1: Mais inteligente/Rápido
+            "models/gemini-2.5-flash",        # Prioridade 2: Estável
+            "models/gemini-2.0-flash",        # Prioridade 3: Fallback
+            "models/gemini-flash-latest"      # Prioridade 4: Último recurso
         ]
         
-        # FASE 2: FORMATTER (ESTRUTURAÇÃO)
-        self.STRUCTURING_MODELS = [
-            "models/gemini-flash-latest"      # Otimizado para JSON
-        ]
-        
-        logger.info(f"🧠 Motores de Raciocínio Carregados: {len(self.REASONING_MODELS)}")
-        logger.info(f"⚡ Motores de Estruturação Carregados: {len(self.STRUCTURING_MODELS)}")
+        logger.info(f"🧠 Motores de IA Carregados (Ordem de Prioridade): {self.AI_MODELS_PRIORITY}")
 
     def _get_env(self, key: str, default: Any = None) -> str:
         """Recupera variáveis de ambiente com log de aviso se ausentes."""
@@ -274,7 +275,7 @@ class InsufficientCreditsError(BaseAPIException):
 def measure_time(func):
     """
     Decorator para medir o tempo de execução de funções assíncronas (Endpoints).
-    Registra o tempo em milissegundos no log.
+    Registra o tempo em milissegundos no log, útil para monitoramento de performance.
     """
     @functools.wraps(func)
     async def wrapper(*args, **kwargs):
@@ -568,9 +569,9 @@ class KeyRotationManager:
 key_manager = KeyRotationManager(settings.GEMINI_KEYS)
 
 # ==============================================================================
-# SEÇÃO 10: HELPERS DE NEGÓCIO E IMAGEM (MOVIDO PARA CIMA)
+# SEÇÃO 10: HELPERS DE NEGÓCIO E IMAGEM (MOVIDOS PARA CIMA)
 # ==============================================================================
-# MOVIDO PARA ANTES DO 'AIOrchestrator' PARA EVITAR NameError
+# IMPORTANTE: Definido ANTES da lógica de IA para evitar problemas de escopo.
 
 def normalizar_texto(texto: str) -> str:
     """Normaliza texto para comparações fuzzy (lowercase, sem acentos)."""
@@ -716,13 +717,12 @@ class PDFReport(FPDF):
         self.ln(2)
 
 # ==============================================================================
-# SEÇÃO 11: SERVIÇOS DE IA - CORE LOGIC & CHAIN OF THOUGHT
+# SEÇÃO 11: SERVIÇOS DE IA - LÓGICA CORE (CHAIN OF THOUGHT)
 # ==============================================================================
 
 class JSONRepairKit:
     """
     Ferramentas avançadas para reparo de strings JSON malformadas.
-    Resolve o erro 'Expecting , delimiter' inserindo vírgulas faltantes.
     """
     
     @staticmethod
@@ -733,28 +733,24 @@ class JSONRepairKit:
             # Remove blocos markdown
             if "```" in text:
                 text = re.sub(r'```json|```', '', text).strip()
-            
-            # Remove comentários estilo C/JS
+            # Remove comentários
             text = re.sub(r'//.*?\n|/\*.*?\*/', '', text, flags=re.S)
-            
-            # Remove vírgulas trailing (erro comum)
+            # Remove vírgulas trailing
             text = re.sub(r',(\s*[}\]])', r'\1', text)
             
-            # --- FIX NUCLEAR PARA ERRO DE VÍRGULA FALTANDO ---
-            # Caso 1: Entre objetos/arrays (ex: } {  ->  }, {)
+            # --- CORREÇÃO NUCLEAR PARA VÍRGULAS FALTANTES ---
+            # Entre objetos/arrays (ex: } { -> }, {)
             text = re.sub(r'([}\]])\s*([{\[])', r'\1,\2', text)
-            
-            # Caso 2: Entre valor e chave (ex: "val" "key" -> "val", "key")
+            # Entre valor e chave (ex: "val" "key" -> "val", "key")
             text = re.sub(r'("\s*)\s+"', r'\1,"', text)
-            
-            # Caso 3: Entre número e chave (ex: 123 "key" -> 123, "key")
+            # Entre número e chave
             text = re.sub(r'(\d+)\s+"', r'\1,"', text)
 
             # Balanceamento de chaves
             open_braces = text.count('{')
             close_braces = text.count('}')
             if open_braces > close_braces: text += '}' * (open_braces - close_braces)
-                
+            
             open_brackets = text.count('[')
             close_brackets = text.count(']')
             if open_brackets > close_brackets: text += ']' * (open_brackets - close_brackets)
@@ -766,7 +762,7 @@ class JSONRepairKit:
     def parse_robust(cls, text_ia: str) -> Dict:
         """
         Método de parseamento robusto que tenta múltiplas estratégias.
-        CORREÇÃO: Renomeado para 'parse_robust' para corresponder à chamada do Orchestrator.
+        CORREÇÃO: Renomeado de 'safe_parse' para 'parse_robust' para consistência.
         """
         # 1. Tentativa Direta
         try: return json.loads(text_ia)
@@ -784,13 +780,12 @@ class JSONRepairKit:
             return json.loads(repaired)
         except json.JSONDecodeError as e:
             logger.error(f"❌ JSON Parse Falhou. Erro: {e}")
-            logger.debug(f"Snippet do JSON falho: {text_ia[:500]}...")
             raise AIStructuringError(f"Falha na formatação do JSON: {e}")
 
 class AIOrchestrator:
     """
     Orquestrador principal da IA. Implementa a arquitetura Chain of Thought
-    com rodízio de chaves aninhado e correção automática de geração vazia.
+    com rodízio de chaves aninhado e consistência de modelo.
     """
     
     @staticmethod
@@ -801,9 +796,8 @@ class AIOrchestrator:
         Tenta TODAS as chaves disponíveis para o modelo especificado.
         """
         keys = key_manager.get_available_keys()
-        if not keys:
-            raise AIProcessingError("Sem chaves de API disponíveis no pool.")
-            
+        if not keys: raise AIProcessingError("Sem chaves de API disponíveis.")
+        
         last_error = None
         
         # Itera sobre todas as chaves disponíveis
@@ -812,10 +806,9 @@ class AIOrchestrator:
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel(model_name)
                 
-                # Configuração dinâmica baseada no modo
                 config = genai.types.GenerationConfig(
                     response_mime_type="application/json" if json_mode else "text/plain",
-                    max_output_tokens=8192, # Contexto aumentado
+                    max_output_tokens=8192,
                     temperature=temperature
                 )
                 
@@ -823,7 +816,7 @@ class AIOrchestrator:
                 if image_bytes:
                     inputs.append({"mime_type": "image/jpeg", "data": image_bytes})
                 
-                # Chamada Síncrona (FastAPI gerencia threads)
+                # Chamada Síncrona
                 response = model.generate_content(inputs, generation_config=config)
                 
                 if response and response.text:
@@ -832,150 +825,106 @@ class AIOrchestrator:
                 
             except Exception as e:
                 err_str = str(e)
-                # Verifica se é erro de cota (429)
                 if "429" in err_str or "Resource exhausted" in err_str:
                     key_manager.report_rate_limit(api_key)
                 
                 logger.warning(f"   ⚠️ Falha parcial: {model_name} (Key ...{api_key[-4:]}): {err_str[:100]}")
                 last_error = e
-                # Delay para evitar spam na API
-                time.sleep(1.0) 
-                continue # Tenta próxima chave
-                
+                time.sleep(1.0)
+                continue 
+        
         # Se saiu do loop, falhou com todas as chaves
-        logger.error(f"❌ Falha total ao invocar modelo {model_name} com todas as chaves disponíveis.")
+        logger.error(f"❌ Falha total ao invocar modelo {model_name} com todas as chaves.")
         raise last_error if last_error else Exception(f"Falha total no modelo {model_name}")
 
     @staticmethod
     def execute_chain_of_thought(context_prompt: str, image_bytes: Optional[bytes]) -> Dict:
         """
-        Pipeline Principal (Two-Pass Generation):
-        1. FASE 1: Raciocínio (Brain) -> Gera texto livre e detalhado.
-        2. FASE 2: Estruturação (Formatter) -> Converte para JSON estrito.
+        Executa o Pipeline Bifásico UNIFICADO:
+        Tenta executar Fase 1 e Fase 2 usando o mesmo modelo (Consistência).
+        Se falhar (todas as chaves), tenta o próximo modelo da lista.
         """
         
-        # --- FASE 1: RACIOCÍNIO (Brain) ---
-        strategy_text = None
-        
-        # Tenta cada modelo de raciocínio na ordem de preferência
-        for model in settings.REASONING_MODELS:
+        # Estratégia: Loop de Modelos Prioritários
+        for model in settings.AI_MODELS_PRIORITY:
+            logger.info(f"🔄 Tentando Pipeline Completo com modelo: {model}...")
+            
             try:
-                logger.info(f"🧠 [Fase 1 - Brain] Iniciando Raciocínio com {model}...")
-                
-                prompt_p1 = context_prompt + "\n\nINSTRUÇÃO CRÍTICA: Gere uma estratégia textual DETALHADA. Não use JSON ainda. Foque na qualidade técnica, bioquímica e biomecânica. Seja VERBOSO e explicativo."
+                # --- FASE 1: RACIOCÍNIO ---
+                logger.info(f"🧠 [Fase 1 - Brain] {model}...")
+                prompt_p1 = context_prompt + "\n\nINSTRUÇÃO CRÍTICA: Gere uma estratégia textual DETALHADA. Não use JSON ainda. Foque na qualidade técnica. Seja VERBOSO."
                 
                 strategy_text = AIOrchestrator._call_gemini_with_retry(
                     model_name=model,
                     prompt=prompt_p1,
                     image_bytes=image_bytes,
                     json_mode=False,
-                    temperature=0.7 # Criatividade alta para estratégia
-                )
-                if strategy_text:
-                    logger.info("🧠 [Fase 1] Estratégia gerada com sucesso.")
-                    break # Sucesso na fase 1
-            except Exception as e:
-                logger.warning(f"⚠️ Modelo {model} esgotado. Tentando próximo da lista...")
-                continue
-        
-        if not strategy_text:
-            # Fallback final: Tenta usar o modelo de estruturação para pensar (último recurso)
-            try:
-                logger.warning("⚠️ Todos modelos de raciocínio falharam. Usando fallback de formatação para pensar...")
-                strategy_text = AIOrchestrator._call_gemini_with_retry(
-                    model_name=settings.STRUCTURING_MODELS[0],
-                    prompt=context_prompt,
-                    image_bytes=image_bytes,
                     temperature=0.7
                 )
-            except Exception as e:
-                raise AIProcessingError(f"Falha catastrófica na IA (Fase 1 - Brain): {e}")
-
-        # --- FASE 2: ESTRUTURAÇÃO (Formatter) ---
-        logger.info("⚡ [Fase 2 - Formatter] Iniciando Estruturação JSON...")
-        
-        exercise_list_str = ExerciseRepository.get_keys_string()
-        
-        # Prompt de Formatação Reforçado (Anti-Empty Array)
-        prompt_p2 = f"""
-        TASK: You are a strict JSON Conversion Engine.
-        Convert the following Fitness Strategy text into a VALID JSON format strictly following the schema below.
-        
-        SOURCE STRATEGY TEXT:
-        {strategy_text}
-        
-        CRITICAL RULES (INTEGRITY CHECK):
-        1. OUTPUT ONLY JSON. No introductory text.
-        2. FULL 7 DAYS REQUIRED: Even if source says "Repeat", generate explicit objects for all 7 days (Segunda-Domingo).
-        3. NO EMPTY ARRAYS: The 'dieta', 'treino', and 'suplementacao' arrays MUST contain data. 
-           - If source is missing info, IMPUTE standard bodybuilding data based on the goal. DO NOT RETURN EMPTY LISTS.
-        4. EXERCISE MAPPING: Map exercises to this list: [{exercise_list_str}]. Use closest match or "(Adaptado)".
-        5. VOLUME: Minimum 8 exercises per workout session.
-        
-        REQUIRED JSON SCHEMA:
-        {{
-          "avaliacao": {{ 
-            "segmentacao": {{ "tronco": "Txt", "superior": "Txt", "inferior": "Txt" }}, 
-            "dobras": {{ "abdominal": "Txt", "suprailiaca": "Txt", "peitoral": "Txt" }}, 
-            "analise_postural": "Txt", "simetria": "Txt", "insight": "Txt" 
-          }},
-          "dieta": [ 
-            {{ "dia": "Segunda-feira", "foco_nutricional": "Txt", "refeicoes": [ {{ "horario": "08:00", "nome": "Café", "alimentos": "Txt" }} ], "macros_totais": "Txt" }},
-            ... (MUST HAVE 7 ITEMS) ...
-          ],
-          "dieta_insight": "Txt",
-          "suplementacao": [ {{ "nome": "Creatina", "dose": "5g", "horario": "Pós", "motivo": "Txt" }} ],
-          "suplementacao_insight": "Txt",
-          "treino": [ 
-             {{ "dia": "Segunda-feira", "foco": "Peito", "exercicios": [ {{ "nome": "Supino", "series_reps": "4x10", "execucao": "Txt", "justificativa_individual": "Txt" }} ], "treino_alternativo": "Txt", "justificativa": "Txt" }},
-             ... (MUST HAVE 7 ITEMS) ...
-          ],
-          "treino_insight": "Txt"
-        }}
-        """
-        
-        try:
-            # Tenta estruturar usando o modelo rápido
-            json_text = AIOrchestrator._call_gemini_with_retry(
-                model_name=settings.STRUCTURING_MODELS[0],
-                prompt=prompt_p2,
-                image_bytes=None, 
-                json_mode=True, # Força modo JSON
-                temperature=0.1 # Temperatura Baixa para precisão
-            )
-            data = JSONRepairKit.parse_robust(json_text)
-            
-            # VALIDAÇÃO DE INTEGRIDADE (Se vier vazio, força erro para retry ou fallback)
-            if not data.get('dieta') or len(data['dieta']) == 0:
-                raise AIStructuringError("IA retornou dieta vazia.")
-            if not data.get('treino') or len(data['treino']) == 0:
-                raise AIStructuringError("IA retornou treino vazio.")
                 
-            return data
-            
-        except Exception as e:
-            logger.error(f"Fase 2 falhou. Tentando parsear texto original como última esperança... {e}")
-            # Fallback: Tenta parsear o texto da Fase 1 se ele já estiver estruturado
-            try:
-                fallback_data = JSONRepairKit.parse_robust(strategy_text)
-                if not fallback_data.get('dieta'):
-                    raise Exception("Fallback vazio")
-                return fallback_data
-            except:
-                raise AIStructuringError("Falha total na geração de dados estruturados.")
+                # --- FASE 2: ESTRUTURAÇÃO (Mesmo Modelo) ---
+                logger.info(f"⚡ [Fase 2 - Formatter] {model}...")
+                exercise_list_str = ExerciseRepository.get_keys_string()
+                
+                prompt_p2 = f"""
+                TASK: You are a strict JSON Conversion Engine.
+                Convert the following Fitness Strategy text into a VALID JSON format.
+                
+                SOURCE STRATEGY TEXT:
+                {strategy_text}
+                
+                CRITICAL RULES:
+                1. OUTPUT ONLY JSON.
+                2. FULL 7 DAYS REQUIRED.
+                3. NO EMPTY ARRAYS. 'dieta', 'treino' must have 7 items.
+                4. Map exercises to: [{exercise_list_str}].
+                
+                REQUIRED JSON SCHEMA:
+                {{
+                  "avaliacao": {{ "segmentacao": {{...}}, "dobras": {{...}}, "analise_postural": "...", "simetria": "...", "insight": "..." }},
+                  "dieta": [ {{ "dia": "Segunda", "foco_nutricional": "...", "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ], "macros_totais": "..." }}, ... ],
+                  "dieta_insight": "...",
+                  "suplementacao": [ {{ "nome": "...", "dose": "...", "horario": "...", "motivo": "..." }} ],
+                  "suplementacao_insight": "...",
+                  "treino": [ 
+                     {{ "dia": "Segunda", "foco": "...", "exercicios": [ {{ "nome": "...", "series_reps": "...", "execucao": "...", "justificativa_individual": "..." }} ], "treino_alternativo": "...", "justificativa": "..." }},
+                     ...
+                  ],
+                  "treino_insight": "..."
+                }}
+                """
+                
+                json_text = AIOrchestrator._call_gemini_with_retry(
+                    model_name=model, # Usa o mesmo modelo
+                    prompt=prompt_p2,
+                    image_bytes=None, 
+                    json_mode=True,
+                    temperature=0.0
+                )
+                
+                data = JSONRepairKit.parse_robust(json_text)
+                
+                # Validação de Integridade
+                if not data.get('dieta') or len(data['dieta']) == 0:
+                    raise ValueError("Lista de dieta vazia")
+                
+                return data # SUCESSO! Sai da função.
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Pipeline falhou com modelo {model}: {e}. Tentando próximo modelo...")
+                continue # Tenta o próximo modelo da lista
+                
+        # Se saiu do loop, todos os modelos falharam
+        raise AIProcessingError("Todos os modelos de IA falharam após múltiplas tentativas.")
 
     @staticmethod
     def simple_generation(prompt: str, image_bytes: Optional[bytes] = None) -> str:
-        """Geração rápida para tarefas simples (ex: comentários, validação)."""
-        try:
-            return AIOrchestrator._call_gemini_with_retry(
-                settings.STRUCTURING_MODELS[0], 
-                prompt, 
-                image_bytes, 
-                json_mode=False
-            )
-        except:
-            return "Estou analisando seu treino... continue focado!"
+        """Geração rápida usando o primeiro modelo disponível."""
+        for model in settings.AI_MODELS_PRIORITY:
+            try:
+                return AIOrchestrator._call_gemini_with_retry(model, prompt, image_bytes, False)
+            except: continue
+        return "Estou analisando seu treino... continue focado!"
 
 # ==============================================================================
 # SEÇÃO 12: APLICAÇÃO FASTAPI & ROTAS
@@ -1032,8 +981,7 @@ def registrar(dados: UserRegister):
 def atualizar_perfil(dados: UserUpdate):
     col = mongo_db.get_collection("usuarios")
     data = {k: v for k, v in dados.model_dump(exclude={'usuario'}).items() if v is not None}
-    res = col.update_one({"usuario": dados.usuario}, {"$set": data})
-    if res.matched_count == 0: raise HTTPException(404, "Usuário não encontrado")
+    col.update_one({"usuario": dados.usuario}, {"$set": data})
     return {"sucesso": True}
 
 # --- ROTA CORE: ANÁLISE ---
@@ -1045,7 +993,7 @@ async def executar_analise(
     altura: str = Form(...), objetivo: str = Form(...), genero: str = Form("Masculino"),
     observacoes: str = Form(""), foto: UploadFile = File(...)
 ):
-    logger.info(f"🚀 Iniciando análise: {usuario}")
+    logger.info(f"🚀 Iniciando análise completa para: {usuario}")
     
     try:
         p_float = float(str(peso).replace(',', '.'))
@@ -1063,14 +1011,14 @@ async def executar_analise(
     prompt = f"""
     ACT AS ELITE COACH. Client: {nome_completo} ({genero}), {p_float}kg, {alt_int}cm. Goal: {objetivo}.
     Restrictions: {user.get('restricoes_fis')}, {user.get('restricoes_alim')}.
-    TASKS: 1. PHYSIQUE ANALYSIS. 2. DIET (7 DAYS). 3. TRAINING (7 DAYS). 4. SUPPLEMENTS.
+    TASKS: 1. PHYSIQUE ANALYSIS. 2. DIET (7 DAYS). 3. TRAINING (7 DAYS, 10+ exercises). 4. SUPPLEMENTS.
     """
     
     try:
         res = AIOrchestrator.execute_chain_of_thought(prompt, img_opt)
-    except Exception as e: 
+    except Exception as e:
         logger.error(f"Erro IA: {e}")
-        raise HTTPException(503, "IA indisponível")
+        raise HTTPException(503, "IA indisponível. Tente novamente.")
     
     if 'treino' in res: res['treino'] = validar_exercicios_final(res['treino'])
     
@@ -1110,7 +1058,7 @@ async def regenerar_secao(dados: dict = Body(...)):
         return {"sucesso": True, "resultado": last}
     except: return {"sucesso": False}
 
-# --- ROTA LEGADA ---
+# --- ROTA LEGADA PARA HISTÓRICO ---
 
 @app.get("/historico/{usuario}", tags=["Perfil"])
 def history(usuario: str):
@@ -1135,14 +1083,12 @@ async def post(usuario: str = Form(...), legenda: str = Form(...), imagem: Uploa
     img = ImageService.optimize(await imagem.read())
     cmt = AIOrchestrator.simple_generation(f"Comentário gym bro para: {legenda}", img)
     mongo_db.get_collection("posts").insert_one({
-        "autor": usuario, "legenda": legenda, 
-        "imagem": base64.b64encode(img).decode('utf-8'), 
-        "data": datetime.now().isoformat(), "likes": [], 
-        "comentarios": [{"autor": "TechnoBolt AI", "texto": cmt}]
+        "autor": usuario, "legenda": legenda, "imagem": base64.b64encode(img).decode('utf-8'),
+        "data": datetime.now().isoformat(), "likes": [], "comentarios": [{"autor": "TechnoBolt AI", "texto": cmt}]
     })
     return {"sucesso": True}
 
-@app.post("/social/curtir")
+@app.post("/social/curtir", tags=["Social"])
 def like(dados: SocialPostRequest):
     col = mongo_db.get_collection("posts")
     oid = ObjectId(dados.post_id)
@@ -1152,30 +1098,29 @@ def like(dados: SocialPostRequest):
         col.update_one({"_id": oid}, {op: {"likes": dados.usuario}})
     return {"sucesso": True}
 
-@app.post("/social/comentar")
+@app.post("/social/comentar", tags=["Social"])
 def comment(dados: SocialCommentRequest):
     mongo_db.get_collection("posts").update_one({"_id": ObjectId(dados.post_id)}, 
         {"$push": {"comentarios": {"autor": dados.usuario, "texto": dados.texto, "data": datetime.now().isoformat()}}})
     return {"sucesso": True}
 
-@app.post("/social/post/deletar")
+@app.post("/social/post/deletar", tags=["Social"])
 def delete_post(dados: SocialPostRequest):
     res = mongo_db.get_collection("posts").delete_one({"_id": ObjectId(dados.post_id), "autor": dados.usuario})
     return {"sucesso": res.deleted_count > 0}
 
-@app.get("/social/ranking")
+@app.get("/social/ranking", tags=["Social"])
 def ranking():
     users = list(mongo_db.get_collection("usuarios").find({"is_admin": False}, {"nome": 1, "usuario": 1, "pontos": 1, "foto_perfil": 1, "_id": 0}).sort("pontos", -1).limit(50))
     return {"sucesso": True, "ranking": users}
 
-@app.get("/social/checkins")
+@app.get("/social/checkins", tags=["Social"])
 def checkins(usuario: str):
-    start = datetime(datetime.now().year, datetime.now().month, 1).isoformat()
-    raw = list(mongo_db.get_collection("checkins").find({"usuario": usuario, "data": {"$gte": start}}))
+    raw = list(mongo_db.get_collection("checkins").find({"usuario": usuario}))
     return {"sucesso": True, "checkins": {datetime.fromisoformat(c['data']).day: c['tipo'] for c in raw}}
 
-@app.post("/social/validar-conquista")
-async def validate_conquest(usuario: str = Form(...), tipo: str = Form(...), foto: UploadFile = File(...)):
+@app.post("/social/validar-conquista", tags=["Social"])
+async def val_conquest(usuario: str = Form(...), tipo: str = Form(...), foto: UploadFile = File(...)):
     now = datetime.now()
     if mongo_db.get_collection("checkins").find_one({"usuario": usuario, "data": {"$gte": datetime(now.year, now.month, now.day).isoformat()}}):
         return {"sucesso": False}
@@ -1189,39 +1134,40 @@ async def validate_conquest(usuario: str = Form(...), tipo: str = Form(...), fot
         return {"sucesso": True, "aprovado": True, "pontos": 50}
     return {"sucesso": True, "aprovado": False}
 
-@app.get("/chat/mensagens")
+@app.get("/chat/mensagens", tags=["Chat"])
 def chat_msgs(user1: str, user2: str):
     msgs = list(mongo_db.get_collection("chat").find({"$or": [{"remetente": user1, "destinatario": user2}, {"remetente": user2, "destinatario": user1}]}).sort("timestamp", 1))
     for m in msgs: m['_id'] = str(m['_id'])
     return {"sucesso": True, "mensagens": msgs}
 
-@app.post("/chat/enviar")
+@app.post("/chat/enviar", tags=["Chat"])
 def chat_send(dados: ChatMessageRequest):
     mongo_db.get_collection("chat").insert_one({**dados.model_dump(), "timestamp": datetime.now().isoformat()})
     return {"sucesso": True}
 
-@app.get("/chat/usuarios")
+@app.get("/chat/usuarios", tags=["Chat"])
 def chat_users(usuario_atual: str):
     return {"sucesso": True, "usuarios": list(mongo_db.get_collection("usuarios").find({"usuario": {"$ne": usuario_atual}}, {"usuario": 1, "nome": 1, "_id": 0}))}
 
-@app.get("/admin/listar")
+@app.get("/admin/listar", tags=["Admin"])
 def admin_l():
-    u = list(mongo_db.get_collection("usuarios").find())
-    for x in u: x['_id'] = str(x['_id'])
-    return {"sucesso": True, "usuarios": u}
+    users = list(mongo_db.get_collection("usuarios").find())
+    for u in users: u['_id'] = str(u['_id'])
+    return {"sucesso": True, "usuarios": users}
 
-@app.post("/admin/editar")
-def admin_e(dados: AdminUserEdit):
-    mongo_db.get_collection("usuarios").update_one({"usuario": dados.target_user}, {"$set": {k:v for k,v in dados.model_dump().items() if v and k!="target_user"}})
+@app.post("/admin/editar", tags=["Admin"])
+def admin_edit(dados: AdminUserEdit):
+    upd = {k: v for k, v in dados.model_dump().items() if v is not None and k != "target_user"}
+    mongo_db.get_collection("usuarios").update_one({"usuario": dados.target_user}, {"$set": upd})
     return {"sucesso": True}
 
-@app.post("/admin/excluir")
-def admin_d(dados: AdminUserEdit):
+@app.post("/admin/excluir", tags=["Admin"])
+def admin_del(dados: AdminUserEdit):
     mongo_db.get_collection("usuarios").delete_one({"usuario": dados.target_user})
     return {"sucesso": True}
 
-@app.get("/setup/criar-admin")
-def setup_adm():
+@app.get("/setup/criar-admin", tags=["Admin"])
+def create_admin():
     if mongo_db.get_collection("usuarios").find_one({"usuario": "admin"}): return {"sucesso": False}
     mongo_db.get_collection("usuarios").insert_one({"usuario": "admin", "senha": "123", "nome": "Admin", "is_admin": True, "status": "ativo", "avaliacoes_restantes": 9999})
     return {"sucesso": True}
@@ -1234,7 +1180,7 @@ def pdf_gen(usuario: str):
         data = user['historico_dossies'][-1]['conteudo_bruto']['json_full']
         
         pdf = PDFReport()
-        pdf.add_page(); pdf.chapter_title(f"RELATORIO: {user.get('nome')}")
+        pdf.add_page(); pdf.chapter_title(f"RELATORIO: {user.get('nome', '').upper()}")
         if 'dieta' in data: 
             pdf.chapter_title("DIETA")
             for d in data['dieta']: pdf.card(d['dia'], str(d['refeicoes']))
