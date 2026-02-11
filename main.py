@@ -875,74 +875,56 @@ class AIOrchestrator:
     @staticmethod
     def execute_chain_of_thought(context_prompt: str, image_bytes: Optional[bytes]) -> Dict:
         """
-        Executes the Unified Chain-of-Thought Pipeline.
+        Executes the Unified Chain-of-Thought Pipeline (Reasoning + Formatting in ONE step).
         
         Strategy:
         1. Iterate through Model Priority List (Gemini 3 -> 2.5 -> 2.0).
-        2. For each model, attempt to run BOTH Phase 1 (Reasoning) and Phase 2 (Formatting).
-        3. If any phase fails for a model (after trying all keys), failover to the next model.
+        2. Construct a single comprehensive prompt including Persona, Instructions, and JSON Schema.
+        3. Execute using JSON Mode.
         """
         
         for model in settings.AI_MODELS_PRIORITY:
-            logger.info(f"🔄 Attempting Pipeline with Model: {model}...")
+            logger.info(f"🔄 Attempting Unified Pipeline with Model: {model}...")
             
             try:
-                # --- PHASE 1: REASONING (The Brain) ---
-                logger.info(f"🧠 [Phase 1 - Reasoning] Running on {model}...")
-                
-                # UPDATE 1: Expert Persona, Volume Elevation & Detailed Justification
-                prompt_p1 = context_prompt + """
-                \n\nCRITICAL INSTRUCTION: Act as a PhD SPORTS SCIENTIST with 20+ years of specialization in Hypertrophy and Strength.
-                Generate a HIGHLY DETAILED, VERBOSE text strategy. Do not output JSON yet.
-                
-                1. VISUAL ASSESSMENT:
-                   - Analyze biomechanics, bone structure, insertion points and asymmetries.
-                   - Estimate Body Fat %.
-                
-                2. DIET & CALORIC SURPLUS:
-                   - Explicitly state TARGET SURPLUS (e.g., +400kcal).
-                   - Calculate specific macro splits (Protein/Carbs/Fats).
-                   - Explain the metabolic logic.
-                
-                3. TRAINING OPTIMIZATION (HIGH FREQUENCY & VOLUME):
-                   - EXTREME VOLUME REQUIRED: Every single workout day MUST have at least 10-12 exercises to maximize metabolic stress and mechanical tension.
-                   - INTENSITY: Focus on high metabolic stress and mechanical tension.
-                   - EXERCISE JUSTIFICATION: For EVERY exercise, provide a concise but scientific biomechanical reason (e.g., "Incline Press targets clavicular fibers to fill upper shelf...").
-                   - Ensure the volume is elevated EVERY DAY (Mon-Sun).
-                """
-                
-                strategy_text = AIOrchestrator._call_gemini_with_retry(
-                    model_name=model,
-                    prompt=prompt_p1,
-                    image_bytes=image_bytes,
-                    json_mode=False,
-                    temperature=0.7
-                )
-                
-                # --- PHASE 2: FORMATTING (The Structurer) ---
-                logger.info(f"⚡ [Phase 2 - Formatting] Running on {model}...")
-                
+                # Retrieve ground truth exercises
                 exercise_list_str = ExerciseRepository.get_keys_string()
                 
-                # UPDATE 2: Strict JSON Schema Enforcement
-                prompt_p2 = f"""
-                TASK: Act as a Strict JSON Compiler.
-                Convert the following Fitness Strategy into VALID JSON matching the schema.
+                # --- UNIFIED PROMPT (Brain + Formatter) ---
+                unified_prompt = f"""
+                ACT AS AN ELITE SPORTS SCIENTIST (PhD) WITH 20+ YEARS EXPERIENCE IN HYPERTROPHY AND STRENGTH.
                 
-                SOURCE TEXT:
-                {strategy_text}
+                CONTEXT:
+                {context_prompt}
                 
-                CONSTRAINTS:
-                1. Output ONLY pure JSON.
-                2. DATA INTEGRITY: 'dieta' & 'treino' must have 7 objects each. 'suplementacao' required.
-                3. EXERCISE COUNT: Ensure 10+ exercises per day in the JSON.
-                4. VALIDATION: Map to: [{exercise_list_str}].
+                CRITICAL INSTRUCTIONS (REASONING & LOGIC):
+                1. VISUAL & BIOMECHANICAL ANALYSIS: Analyze the user's physique, bone structure, insertion points, and estimated body fat.
+                2. DIET STRATEGY: Create a caloric surplus plan (+400kcal approx) with specific macro splits. Explain the metabolic logic.
+                3. TRAINING PROTOCOL: Design a High Frequency/High Volume split (Mon-Sun).
+                   - REQUIREMENT: Every single workout MUST have 10-12 exercises to maximize metabolic stress.
+                   - INTENSITY: Focus on failure points and mechanical tension.
+                   - EXERCISE MAPPING: Map exercises to this list if possible: [{exercise_list_str}].
+                   - EXERCISE JUSTIFICATION: Provide a biomechanical reason for each exercise chosen.
+                4. SUPPLEMENTATION: Evidence-based stack only.
+
+                OUTPUT FORMAT (MANDATORY):
+                You must output ONLY valid JSON matching the schema below. No markdown blocks.
                 
-                SCHEMA:
+                JSON SCHEMA:
                 {{
-                  "avaliacao": {{ "segmentacao": {{...}}, "dobras": {{...}}, "analise_postural": "...", "simetria": "...", "estimativa_gordura": "...", "insight": "..." }},
-                  "dieta": [ {{ "dia": "Segunda", "foco_nutricional": "...", "superavit_calorico": "...", "calculo_calorico": "...", "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ], "macros_totais": "..." }}, ... ],
-                  "dieta_insight": "...",
+                  "avaliacao": {{ 
+                    "segmentacao": {{ "tronco": "...", "superior": "...", "inferior": "..." }}, 
+                    "dobras": {{ "abdominal": "...", "suprailiaca": "...", "peitoral": "..." }}, 
+                    "analise_postural": "...", 
+                    "simetria": "...", 
+                    "estimativa_gordura": "...", 
+                    "insight": "Detailed biomechanical analysis here..." 
+                  }},
+                  "dieta": [ 
+                    {{ "dia": "Segunda", "foco_nutricional": "...", "superavit_calorico": "...", "calculo_calorico": "...", "refeicoes": [ {{ "horario": "...", "nome": "...", "alimentos": "..." }} ], "macros_totais": "..." }}, 
+                    ... (ENSURE 7 DAYS) 
+                  ],
+                  "dieta_insight": "Metabolic logic explanation...",
                   "suplementacao": [ {{ "nome": "...", "dose": "...", "horario": "...", "motivo": "..." }} ],
                   "suplementacao_insight": "...",
                   "treino": [ 
@@ -950,22 +932,29 @@ class AIOrchestrator:
                         "dia": "Segunda", "foco": "...", 
                         "exercicios": [ {{ "nome": "...", "series_reps": "...", "execucao": "...", "justificativa_biomecanica": "..." }} ], 
                         "treino_alternativo": "...", "justificativa": "..." 
-                     }}, ...
+                     }}, 
+                     ... (ENSURE 7 DAYS)
                   ],
-                  "treino_insight": "..."
+                  "treino_insight": "Volume and intensity justification..."
                 }}
                 """
                 
+                # Execute Unified Call
                 json_text = AIOrchestrator._call_gemini_with_retry(
-                    model_name=model, prompt=prompt_p2, image_bytes=None, json_mode=True, temperature=0.0
+                    model_name=model, 
+                    prompt=unified_prompt, 
+                    image_bytes=image_bytes, 
+                    json_mode=True, 
+                    temperature=0.4 # Balanced for reasoning within structured output
                 )
                 
+                # Parse & Validate
                 data = JSONRepairKit.parse_robust(json_text)
-                if not data.get('dieta') or len(data['dieta']) < 1: raise ValueError("Empty diet.")
+                if not data.get('dieta') or len(data['dieta']) < 1: raise ValueError("Empty diet received.")
                 return data 
                 
             except Exception as e:
-                logger.warning(f"⚠️ Pipeline Failed: {e}. Trying next model...")
+                logger.warning(f"⚠️ Unified Pipeline Failed on {model}: {e}. Trying next model...")
                 continue 
         
         raise AIProcessingError("All AI models failed.")
