@@ -1,9 +1,9 @@
 """
-TechnoBolt Gym Hub API - Enterprise Architect Edition (Titanium-Max-Ultra-Final)
-Version: 2026.5.4-Production
+TechnoBolt Gym Hub API - Enterprise Architect Edition
+Version: 2026.5.3-Titanium-Max-Ultra
 Architecture: Modular Monolith | Hexagonal-ish | Event-Driven AI Pipeline
 Author: TechnoBolt Engineering Team (Principal Architect)
-Timestamp: 2026-02-11 18:00:00 UTC
+Timestamp: 2026-02-11 17:45:00 UTC
 
 System Overview:
 This backend serves as the central nervous system for the TechnoBolt ecosystem.
@@ -34,16 +34,14 @@ import traceback
 import hashlib
 import uuid
 import sys
-import threading
 from datetime import datetime, timedelta
 from typing import (
     List, Optional, Any, Dict, Union, Callable, TypeVar, Tuple, Set, 
-    Generator, AsyncGenerator, Coroutine, Generic
+    Generator, AsyncGenerator, Coroutine
 )
 from enum import Enum, auto
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from collections import OrderedDict
 
 # --- FRAMEWORKS E UTILITÁRIOS EXTERNOS ---
 from fastapi import (
@@ -107,29 +105,26 @@ from fpdf import FPDF
 # ==============================================================================
 
 class RequestContext:
-    """
-    Context manager for request-scoped data.
-    Ensures that every log message can be traced back to a specific user request.
-    """
-    _local = threading.local()
+    """Stores context for the current request execution flow."""
+    _request_id: str = "system-startup"
 
     @classmethod
     def set_id(cls, req_id: str):
-        cls._local.req_id = req_id
+        cls._request_id = req_id
 
     @classmethod
     def get_id(cls) -> str:
-        return getattr(cls._local, 'req_id', 'system-boot')
+        return cls._request_id
 
 class EnterpriseLogger:
     """
     Structured logging system designed for high-concurrency production environments.
-    Ensures every log entry is traceable to a specific request ID and provides standardized formatting.
+    Ensures every log entry is traceable to a specific request ID.
     """
     
     @staticmethod
     def setup() -> logging.Logger:
-        """Configures the root logger with custom formatting and stream handling."""
+        """Configures the root logger with custom formatting."""
         logger = logging.getLogger("TechnoBoltAPI")
         logger.setLevel(logging.INFO)
         
@@ -145,27 +140,12 @@ class EnterpriseLogger:
                 record.req_id = RequestContext.get_id()
                 return True
 
-        # ANSI Colors for better DX
-        class ColoredFormatter(logging.Formatter):
-            grey = "\x1b[38;20m"
-            yellow = "\x1b[33;20m"
-            red = "\x1b[31;20m"
-            bold_red = "\x1b[31;1m"
-            reset = "\x1b[0m"
-            format_str = '%(asctime)s | %(levelname)-8s | [%(req_id)s] | %(module)s:%(funcName)s:%(lineno)d | %(message)s'
-
-            def format(self, record):
-                log_fmt = self.format_str
-                if record.levelno == logging.WARNING:
-                    log_fmt = self.yellow + self.format_str + self.reset
-                elif record.levelno == logging.ERROR:
-                    log_fmt = self.red + self.format_str + self.reset
-                elif record.levelno == logging.CRITICAL:
-                    log_fmt = self.bold_red + self.format_str + self.reset
-                formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d %H:%M:%S')
-                return formatter.format(record)
-
-        handler.setFormatter(ColoredFormatter())
+        formatter = logging.Formatter(
+            fmt='%(asctime)s | %(levelname)-8s | [%(req_id)s] | %(module)s:%(funcName)s:%(lineno)d | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        
+        handler.setFormatter(formatter)
         handler.addFilter(ContextFilter())
         logger.addHandler(handler)
         
@@ -224,7 +204,7 @@ class Settings:
         
         # API Metadata
         self.API_TITLE = "TechnoBolt Gym Hub API"
-        self.API_VERSION = "2026.5.4-Titanium-Max-Ultra"
+        self.API_VERSION = "2026.5.3-Titanium-Max-Ultra"
         self.ENV = self._get_env("ENV", "production")
         
         # AI Configuration (Load Balancer Pool)
@@ -239,7 +219,9 @@ class Settings:
             "models/gemini-flash-latest"      # Quaternary: Last Resort
         ]
         
-        # We don't separate structuring models anymore to keep context consistent
+        self.AI_STRUCTURE_MODELS = [
+            "models/gemini-flash-latest"
+        ]
         
         logger.info(f"🧠 AI Priority Chain Loaded: {len(self.AI_MODELS_PRIORITY)} models active.")
 
@@ -733,28 +715,6 @@ class PDFReport(FPDF):
         self.multi_cell(0, 6, self.sanitize(body), fill=True)
         self.ln(2)
 
-class CacheManager:
-    """
-    Simple In-Memory LRU Cache to reduce AI load for repeated queries.
-    Uses `OrderedDict` to maintain access order.
-    """
-    _cache = OrderedDict()
-    _capacity = 100 # Keep last 100 entries
-
-    @classmethod
-    def get(cls, key: str) -> Any:
-        if key in cls._cache:
-            cls._cache.move_to_end(key) # Mark as recently used
-            return cls._cache[key]
-        return None
-
-    @classmethod
-    def set(cls, key: str, value: Any):
-        cls._cache[key] = value
-        cls._cache.move_to_end(key)
-        if len(cls._cache) > cls._capacity:
-            cls._cache.popitem(last=False) # Remove oldest
-
 # ==============================================================================
 # SECTION 9: AI INFRASTRUCTURE (KEY ROTATION)
 # ==============================================================================
@@ -934,7 +894,7 @@ class AIOrchestrator:
                 # --- PHASE 1: REASONING (The Brain) ---
                 logger.info(f"🧠 [Phase 1 - Reasoning] Running on {model}...")
                 
-                # UPDATE 1: Expert Persona, Volume Elevation & Detailed Justification
+                # UPDATE 1: Enhanced Physical Assessment & Caloric Surplus Logic
                 prompt_p1 = context_prompt + """
                 \n\nCRITICAL INSTRUCTION: Act as a PhD SPORTS SCIENTIST with 20+ years of specialization in Hypertrophy and Strength.
                 Generate a HIGHLY DETAILED, VERBOSE text strategy. Do not output JSON yet.
@@ -1016,16 +976,8 @@ class AIOrchestrator:
 
     @staticmethod
     def simple_generation(prompt: str, image_bytes: Optional[bytes] = None) -> str:
-        # Check cache first
-        cache_key = hashlib.md5((prompt + str(image_bytes)).encode()).hexdigest()
-        cached = CacheManager.get(cache_key)
-        if cached: return cached
-
         for model in settings.AI_MODELS_PRIORITY:
-            try: 
-                result = AIOrchestrator._call_gemini_with_retry(model, prompt, image_bytes, False)
-                CacheManager.set(cache_key, result)
-                return result
+            try: return AIOrchestrator._call_gemini_with_retry(model, prompt, image_bytes, False)
             except: continue
         return "Processing..."
 
